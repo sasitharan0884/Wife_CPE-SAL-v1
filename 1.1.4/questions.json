@@ -1,0 +1,33 @@
+{
+  "questions": [
+    {
+      "id": "local_management_access_methods",
+      "label": "Local Management Access Methods in Scope",
+      "type": "list",
+      "hint": "Example: Console",
+      "required": true
+    },
+    {
+      "id": "remote_management_access_methods",
+      "label": "Remote Management Access Methods in Scope",
+      "type": "list",
+      "hint": "Example: HTTPS, SSH, SNMPv3",
+      "required": true
+    },
+    {
+      "id": "controller_present",
+      "label": "Is a Controller involved?",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "id": "controller_type",
+      "label": "Controller Type / Name",
+      "type": "text",
+      "required": true,
+      "show_if": {
+        "controller_present": true
+      }
+    }
+  ]
+}

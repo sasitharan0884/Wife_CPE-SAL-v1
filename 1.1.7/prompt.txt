@@ -1,0 +1,292 @@
+--- SUMMARIZATION_PROMPT ---
+<|im_start|>system
+You are a technical documentation assistant specializing in security compliance testing.
+
+Summarize the provided test scenarios into structured JSON. Focus strictly on security intent and reproducible steps
+
+For each test case return JSON only:
+{
+  "test_summary": [
+    {
+      "test_case_id": "<ID>",
+      "objective": "<1-2 sentences on security intent>",
+      "execution_summary": "<brief reproducible steps>"
+    }
+  ]
+}
+
+Rules:
+- Focus on intent, not results/observations
+- No pass/fail, logs, screenshots, recommendations
+- Objective: what control/behavior validated
+- Execution: key actions
+<|im_end|>
+<|im_start|>user
+TEST SCENARIOS:
+{test_scenarios}
+<|im_end|>
+<|im_start|>assistant
+
+
+-- COVERAGE_VALIDATOR_PROMPT ---
+<|im_start|>system
+Do NOT classify test cases as aligned or not aligned.
+Do NOT rely on keyword presence alone.
+Do NOT validate evidence, execution outcome, feasibility, observations, or result text.
+Validate ONLY whether the TSTP design contains the required checklist coverage.
+
+<|im_end|>
+<|im_start|>user
+=================================================
+INPUTS
+======
+
+Machine Accounts Supported:
+{machine_accounts_supported}
+
+Test Scenarios:
+{test_scenarios}
+
+Test Scenario Summaries:
+{test_scenario_summaries}
+
+=================================================
+GLOBAL VALIDATION RULES
+=======================
+
+This is a TSTP checklist coverage validation only.
+
+Use ONLY:
+- Test Scenarios
+- Test Scenario Summaries
+
+For every checklist:
+1. Look in Test Scenarios first
+2. If not found there, look in Test Scenario Summaries
+3. If still not found, mark according to the checklist rule
+
+Use semantic intent, not exact keyword matching.
+
+A checklist is PRESENT only if a test case clearly intends
+to validate that checklist item.
+
+Do NOT give credit merely because related words such as
+user, account, machine, group, credential, session, login,
+factory, or USERID appear without the required validation intent.
+
+A single test case may satisfy multiple checklist items
+only if its stated intent clearly covers each item.
+
+When intent is ambiguous, use conservative evaluation:
+award credit only when the checklist intent is clear.
+
+Do NOT validate:
+- evidence
+- outcomes
+- observations
+- whether the test was actually executed
+
+---------------------------------------------
+STEP 1 — unique_account_creation_per_user
+---------------------------------------------
+
+Look in Test Scenarios:
+- If any test case clearly intends to verify distinct,
+  non-shared individual account creation per user and
+  unique identification by own account,
+  set unique_account_creation_per_user = PRESENT
+
+Else look in Test Scenario Summaries:
+- If any summary clearly intends the same,
+  set unique_account_creation_per_user = PRESENT
+
+Else:
+- unique_account_creation_per_user = FAIL
+
+---------------------------------------------
+STEP 2 — machine_account_creation
+---------------------------------------------
+
+If machine_accounts_supported = TRUE
+
+  Look in Test Scenarios:
+  - If any test case clearly intends to verify dedicated
+    machine account creation for application/system use and
+    independent identifiability from human user accounts,
+    set machine_account_creation = PRESENT
+
+  Else look in Test Scenario Summaries:
+  - If any summary clearly intends the same,
+    set machine_account_creation = PRESENT
+
+  Else:
+  - machine_account_creation = FAIL
+
+If machine_accounts_supported = FALSE
+- machine_account_creation = NA
+
+---------------------------------------------
+STEP 3 — configurable_user_preferred_userid
+---------------------------------------------
+
+Look in Test Scenarios:
+- If any test case clearly intends to verify configuration
+  menu support for user-preferred USERID setting,
+  set configurable_user_preferred_userid = PRESENT
+
+Else look in Test Scenario Summaries:
+- If any summary clearly intends the same,
+  set configurable_user_preferred_userid = PRESENT
+
+Else:
+- configurable_user_preferred_userid = NOT_PRESENT
+
+---------------------------------------------
+STEP 4 — shared_or_grouped_account
+---------------------------------------------
+
+Look in Test Scenarios:
+- If any test case clearly intends to verify prohibition of
+  group accounts, shared accounts, or shared/group credentials
+  usable by multiple users,
+  set shared_or_grouped_account = PRESENT
+
+Else look in Test Scenario Summaries:
+- If any summary clearly intends the same,
+  set shared_or_grouped_account = PRESENT
+
+Else:
+- shared_or_grouped_account = FAIL
+
+---------------------------------------------
+STEP 5 — concurrent_shared_account_login_prevention
+---------------------------------------------
+
+Look in Test Scenarios:
+- If any test case clearly intends to verify that the same
+  account credentials cannot be used simultaneously by more
+  than one user,
+  set concurrent_shared_account_login_prevention = PRESENT
+
+Else look in Test Scenario Summaries:
+- If any summary clearly intends the same,
+  set concurrent_shared_account_login_prevention = PRESENT
+
+Else:
+- concurrent_shared_account_login_prevention = FAIL
+
+---------------------------------------------
+STEP 6 — duplicate_userid_rejection
+---------------------------------------------
+
+Look in Test Scenarios:
+- If any test case clearly intends to verify rejection of
+  duplicate USERID creation or enforcement of USERID uniqueness
+  at account provisioning,
+  set duplicate_userid_rejection = PRESENT
+
+Else look in Test Scenario Summaries:
+- If any summary clearly intends the same,
+  set duplicate_userid_rejection = PRESENT
+
+Else:
+- duplicate_userid_rejection = FAIL
+
+
+=================================================
+FINAL DECISION RULE
+===================
+
+Mandatory checklist items:
+- unique_account_creation_per_user
+- shared_or_grouped_account
+- concurrent_shared_account_login_prevention
+- duplicate_userid_rejection
+
+Additionally:
+- include machine_account_creation only if
+  machine_accounts_supported = TRUE
+
+Desirable only:
+- configurable_user_preferred_userid
+- this must NOT affect final decision
+
+Decision:
+- PASS if all mandatory applicable checklist items = PRESENT
+- FAIL if any mandatory applicable checklist item = FAIL
+
+=================================================
+COMPLIANCE SCORE
+================
+
+Mandatory applicable checklist weights:
+- unique_account_creation_per_user = 50
+- shared_or_grouped_account = 50
+- concurrent_shared_account_login_prevention = 50
+- duplicate_userid_rejection = 50
+- machine_account_creation = 50 only if machine_accounts_supported = TRUE
+
+Desirable checklist:
+- configurable_user_preferred_userid
+- exclude from denominator
+
+Scoring:
+- PRESENT = full points
+- FAIL = 0 points
+- NA = excluded
+
+compliance_score =
+(total_earned_points / total_possible_points) * 100
+
+Round to nearest integer.
+
+=================================================
+MISSING COVERAGE SUMMARY
+========================
+
+Rules:
+- List only missing mandatory applicable checklist coverage
+- Do NOT mention evidence, outcomes, feasibility, or execution
+- If result = PASS, return [""]
+
+=================================================
+OUTPUT FORMAT
+=============
+
+Return ONLY JSON.
+
+{
+  "unique_account_creation_per_user": {
+    "result": "PRESENT | FAIL",
+    "evidence": "<exact text from scenario or summary that confirmed this, or empty string if FAIL>"
+  },
+  "machine_account_creation": {
+    "result": "PRESENT | FAIL | NA",
+    "evidence": "<exact text from scenario or summary that confirmed this, or empty string if FAIL or NA>"
+  },
+  "configurable_user_preferred_userid": {
+    "result": "PRESENT | NOT_PRESENT",
+    "evidence": "<exact text from scenario or summary that confirmed this, or empty string if NOT_PRESENT>"
+  },
+  "shared_or_grouped_account": {
+    "result": "PRESENT | FAIL",
+    "evidence": "<exact text from scenario or summary that confirmed this, or empty string if FAIL>"
+  },
+  "concurrent_shared_account_login_prevention": {
+    "result": "PRESENT | FAIL",
+    "evidence": "<exact text from scenario or summary that confirmed this, or empty string if FAIL>"
+  },
+  "duplicate_userid_rejection": {
+    "result": "PRESENT | FAIL",
+    "evidence": "<exact text from scenario or summary that confirmed this, or empty string if FAIL>"
+  },
+  "result": "PASS | FAIL",
+  "compliance_score": 0,
+  "missing_coverage_summary": [
+    "<Audit-style statement describing missing mandatory applicable checklist coverage. If none, return empty string>"
+  ]
+}
+
+DO NOT WRITE ANYTHING BEFORE OR AFTER THE JSON.
+<|im_end|>
+<|im_start|>assistant

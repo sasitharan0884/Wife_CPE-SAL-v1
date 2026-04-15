@@ -1,0 +1,20 @@
+{
+  "questions": [
+    {
+      "id": "user_account_type",
+      "label": "Which type of user accounts does the DUT support?",
+      "type": "select",
+      "options": [
+        "dynamic user accounts",
+        "predefined/factory user accounts"
+      ],
+      "required": true
+    },
+    {
+      "id": "machine_accounts_supported",
+      "label": "Does the DUT support Machine Accounts?",
+      "type": "boolean",
+      "required": true
+    }
+  ]
+}

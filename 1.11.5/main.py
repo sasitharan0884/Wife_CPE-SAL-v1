@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import re
 from pathlib import Path
@@ -8,12 +7,6 @@ from urllib import request
 import time
 from urllib import error
 
-# Reconfigure stdout/stderr to UTF-8 to avoid UnicodeEncodeError on Windows cp1252 consoles
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
 BASE_DIR = Path(__file__).parent
 
 # ---------------------------------------------------------------------------
@@ -21,16 +14,110 @@ BASE_DIR = Path(__file__).parent
 # ---------------------------------------------------------------------------
 
 # Injected from MuruganAI Runner Environment Variables (No Hardcoded Values)
-
-
-DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.142.5:30203/v1/chat/completions")
+DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.138.153:30252/v1/chat/completions")
 DEFAULT_LLM_MODEL = os.environ.get("DYNAMIC_LLM_MODEL", "sorc/qwen3.5-instruct:latest")
 DEFAULT_VL_MODEL = os.environ.get("DYNAMIC_VLM_MODEL") or os.environ.get("DYNAMIC_LLM_MODEL") or "sorc/qwen3.5-instruct:latest"
-DEFAULT_LLM_BEARER_TOKEN = os.environ.get("DYNAMIC_LLM_BEARER_TOKEN") or os.environ.get("DYNAMIC_LLM_API_KEY") or "fe83463d7f7b8a391bf9bd9d68fe65c9daf12b0529bdd4ee1fec36aa51e74134"
+DEFAULT_LLM_BEARER_TOKEN = os.environ.get("DYNAMIC_LLM_BEARER_TOKEN") or os.environ.get("DYNAMIC_LLM_API_KEY") or "e4cb8ddb3bf23c4f8b90d7e1d2b75be424ac3a96ecafb1e5ad8c4d44647eeb75"
+
 StructuredInput = Union[Dict[str, Any], str, Path]
 
+GAP_ANALYZER_PROMPT_TEMPLATE = """
+--- OUT_OF_SCOPE_VALIDATOR_PROMPT ---
+SYSTEM
+======
+You are a TELECOM TEST PLAN VALIDATOR specializing
+in TSTP (Test Schedule and Test Procedure) evaluation for
+telecom security assurance requirements (ITSAR/NCCS).
 
-def load_prompts() -> Dict[str, str]: 
+Your task is to verify whether the provided TEST SCENARIO
+is within scope for HTTP method restriction and security
+validation (Requirement 1.11.5).
+
+You MUST evaluate scope based STRICTLY on test design
+intent (TSTP) — NOT on execution outcome, system behavior,
+or implementation correctness.
+DO NOT evaluate:
+  * Test execution results or pass/fail outcomes
+  * Execution feasibility or system constraints
+  * Implementation-level correctness
+  * Keyword presence alone without design intent
+DO NOT classify test cases as aligned or not aligned.
+
+=================================================
+INPUTS
+======
+Test Scenario:
+{test_scenario}
+
+=================================================
+SCOPE CONSTRAINT (STRICT — 1.11.5 ONLY)
+========================================
+The scenario is IN-SCOPE only if it clearly relates to
+HTTP method restriction testing, including any of:
+  * Allowed HTTP methods (GET, HEAD, POST)
+  * Unused/disabled HTTP methods (PUT, DELETE, PATCH, CONNECT)
+  * TRACE method validation
+  * TRACK method validation
+  * OPTIONS / Allow header discovery
+
+DO NOT accept scenarios that test unrelated security areas
+(e.g., authentication, password masking, encryption, firewall).
+
+=================================================
+VALIDATION STEP
+===============
+
+STEP 1 — SCOPE CHECK FOR THE PROVIDED TEST SCENARIO
+-----------------------------------------------------
+
+CHECK 1 — HTTP METHOD RELEVANCE
+---------------------------------
+Does the test scenario explicitly reference or clearly
+intend to test HTTP method restriction or validation?
+
+PASS condition:
+  The scenario mentions specific HTTP methods (GET, POST,
+  HEAD, PUT, DELETE, PATCH, CONNECT, TRACE, TRACK, OPTIONS)
+  AND includes test intent (send, verify, attempt, validate)
+  → set http_method_scope = PASS
+
+FAIL condition:
+  No HTTP method is mentioned or the scenario targets
+  a completely unrelated security domain
+  → set http_method_scope = FAIL
+
+=================================================
+FINAL DECISION
+==============
+IF http_method_scope = PASS → result = "IN-SCOPE"
+IF http_method_scope = FAIL → result = "OUT-OF-SCOPE"
+
+=================================================
+DEVIATION SUMMARY RULE
+=================================================
+If result = "OUT-OF-SCOPE":
+    deviation_summary must:
+    * be a concise statement explaining WHY the test case is OUT-OF-SCOPE.
+    * focus on what the scenario actually tests instead of HTTP methods.
+    * NOT mention internal check IDs.
+    * NOT use technical PASS/FAIL terminology.
+
+If result = "IN-SCOPE":
+    deviation_summary = []
+
+=================================================
+OUTPUT FORMAT
+=================================================
+Return ONLY valid JSON. No explanation.
+{
+  "http_method_scope": "PASS | FAIL",
+  "result": "IN-SCOPE | OUT-OF-SCOPE",
+  "deviation_summary": [
+    "<Specific out-of-scope reason. Empty if PASS>"
+  ]
+}"""
+
+def load_prompts() -> Dict[str, str]:
     content = (BASE_DIR / "prompt.txt").read_text(encoding="utf-8")
     prompts = {}
     current_name = None
@@ -60,9 +147,6 @@ def load_prompts() -> Dict[str, str]:
     return prompts
 
 
-def load_answers(answers_path: Path) -> Dict[str, Any]:
-    return json.loads(answers_path.read_text(encoding="utf-8"))
-
 
 def render_prompt(template: str, values: Dict[str, str]) -> str:
     for key, val in values.items():
@@ -70,96 +154,56 @@ def render_prompt(template: str, values: Dict[str, str]) -> str:
     return template
 
 
-def _parse_chatml(text: str) -> List[Dict[str, str]]:
+def _parse_prompt_sections(text: str) -> List[Dict[str, str]]:
     """
-    Parse a string containing ChatML tags into a list of messages.
-    Supports: <|im_start|>role\ncontent<|im_end|>
-    Also supports content until the next <|im_start|> or end of text.
+    Parse a prompt string into a list of messages using SYSTEM:/USER: headers.
+    Falls back to treating the entire text as a single user message if no headers found.
     """
     messages = []
-    # Pattern to find structured ChatML blocks
-    # Role is immediately after start tag, then everything until end of that line
-    # Then content until the next im_start, im_end, or end of string
-    pattern = r"<\|im_start\|>(\w+).*?\n(.*?)(?=<\|im_start\|>|<\|im_end\|>|$)"
-    
-    matches = list(re.finditer(pattern, text, re.DOTALL))
-    
-    if not matches:
-        # Fallback if no tags found: treat everything as a user message
+    # Split on lines that are exactly "SYSTEM:" or "USER:" (with optional whitespace)
+    sections = re.split(r'^(SYSTEM:|USER:)\s*$', text.strip(), flags=re.MULTILINE)
+
+    if len(sections) < 3:
+        # No SYSTEM:/USER: headers found — treat entire text as user message
         return [{"role": "user", "content": text.strip()}]
-    
-    for match in matches:
-        role = match.group(1).strip()
-        content = match.group(2).strip()
-        messages.append({"role": role, "content": content})
-        
-    return messages
+
+    # sections alternates: [preamble, "SYSTEM:", content, "USER:", content, ...]
+    i = 1  # skip preamble (usually empty)
+    while i < len(sections) - 1:
+        header = sections[i].strip().rstrip(':').lower()
+        content = sections[i + 1].strip()
+        if header and content:
+            messages.append({"role": header, "content": content})
+        i += 2
+
+    return messages if messages else [{"role": "user", "content": text.strip()}]
 
 
-def _normalize_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str):
-        return [part.strip() for part in value.split(",") if part.strip()]
-    return [str(value).strip()] if str(value).strip() else []
+def _is_llm_reachability_error(exc: Exception) -> bool:
+    if isinstance(exc, (error.URLError, TimeoutError)):
+        return True
+    if isinstance(exc, error.HTTPError):
+        return True
 
-
-def _normalize_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("yes", "true", "1")
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return False
-
-
-def ensure_answers(answers: Dict[str, Any]) -> Dict[str, Any]:
-    required_keys = [
-        "user_account_creation",
-        "machine_accounts_supported",
+    message = str(exc).lower()
+    keywords = [
+        "timed out",
+        "timeout",
+        "connection refused",
+        "failed to establish a new connection",
+        "temporary failure",
+        "name or service not known",
+        "nodename nor servname provided",
     ]
-    missing = [key for key in required_keys if key not in answers]
-    if missing:
-        raise ValueError(f"Missing required keys in answer.json: {', '.join(missing)}")
-
-    normalized = dict(answers)
-
-    normalized["machine_accounts_supported"] = _normalize_bool(answers.get("machine_accounts_supported"))
-
-    # Derive YES/NO flags from user_account_creation boolean
-    # TRUE  → DUT supports dynamic account creation → dynamic=YES, predefined=NO
-    # FALSE → DUT uses predefined/factory accounts only → dynamic=NO, predefined=YES
-    user_account_creation = _normalize_bool(answers.get("user_account_creation", False))
-    normalized["user_account_creation"] = user_account_creation
-
-    if user_account_creation:
-        normalized["dynamic_user_accounts"] = "YES"
-        normalized["predefined/factory_user_accounts"] = "NO"
-        normalized["account_mode"] = "dynamic user accounts"
-    else:
-        normalized["dynamic_user_accounts"] = "NO"
-        normalized["predefined/factory_user_accounts"] = "YES"
-        normalized["account_mode"] = "predefined/factory user accounts"
-
-    return normalized
+    return any(token in message for token in keywords)
 
 # Pre-load prompts once
 PROMPTS = load_prompts()
 SUMMARIZATION_PROMPT = PROMPTS.get("SUMMARIZATION_PROMPT", "")
 SINGLE_SUMMARIZATION_PROMPT = SUMMARIZATION_PROMPT.replace("test scenarios", "test scenario").replace("each test case", "the test case")
-# GAP analyzer prompts — selected at runtime based on user_account_creation
-GAP_ANALYZER_PROMPT_SUPPORTED     = PROMPTS.get("GAP_ANALYZER_PROMPT_USER_CREATION_SUPPORTED", "")
-GAP_ANALYZER_PROMPT_NOT_SUPPORTED = PROMPTS.get("GAP_ANALYZER_PROMPT_USER_CREATION_NOT_SUPPORTED", "")
-# Split coverage validator prompts — selected at runtime based on user_account_creation
-COVERAGE_VALIDATOR_PROMPT_YES = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT_YES", "")
-COVERAGE_VALIDATOR_PROMPT_NO  = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT_NO", "")
+GAP_ANALYZER_PROMPT = GAP_ANALYZER_PROMPT_TEMPLATE # Use hardcoded latest version
+COVERAGE_VALIDATOR_PROMPT = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT", "")
 
-
-def _normalize_title(title: str) -> str:
-    return re.sub(r'[^a-z0-9]', '', title.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +211,6 @@ def _normalize_title(title: str) -> str:
 # ---------------------------------------------------------------------------
 
 def assess_section_health(structured_data: dict) -> dict:
-    """
-    Evaluate 3 sections from AI structured JSON.
-    Returns dict with keys: section_81, section_84, section_11
-    Each value is 0 (healthy) or 1 (unhealthy / has FAIL status).
-    Also returns raw lists for downstream use.
-    """
     scenarios_81 = []
     steps_84 = []
     cases_11 = []
@@ -185,8 +223,11 @@ def assess_section_health(structured_data: dict) -> dict:
     status_84 = ""
     status_11 = ""
 
+    def normalize_title(title: str) -> str:
+        return re.sub(r'[^a-z0-9]', '', title.lower())
+
     for section in structured_data.get("sections", []):
-        tn = _normalize_title(section.get("title", ""))
+        tn = normalize_title(section.get("title", ""))
 
         if "numberoftestscenarios" in tn:
             sec_81_found = True
@@ -202,16 +243,12 @@ def assess_section_health(structured_data: dict) -> dict:
             status_11 = str(section.get("status", "")).upper()
 
     def _is_unhealthy(found: bool, sec_status: str, items: list) -> int:
-        # If the section wasn't even in the JSON, it's missing (unhealthy)
         if not found:
             return 1
-        # If the section explicitly says FAIL
         if sec_status == "FAIL":
             return 1
-        # If any item inside explicitly says FAIL
         if any(isinstance(item, dict) and str(item.get("status", "")).upper() == "FAIL" for item in items):
             return 1
-        # Otherwise, it's healthy (0). Even if items are empty, it's valid (e.g. 0 scenarios).
         return 0
 
     s81 = _is_unhealthy(sec_81_found, status_81, scenarios_81)
@@ -241,47 +278,327 @@ def assess_section_health(structured_data: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# EXTRACT & COMBINE FOR LLM
+# PIPELINE OUTPUT SKELETON HELPERS
 # ---------------------------------------------------------------------------
 
-def extract_scenarios_for_llm(health: dict) -> list:
-    """
-    Positional extraction from raw section data (8.1, 8.4, 11).
-    Returns combined list for LLM processing.
-    """
-    scenarios_81 = health["raw_81"]
-    steps_84 = health["raw_84"]
-    cases_11 = health["raw_11"]
+def _load_pipeline_skeleton(pipeline_path: Path) -> dict:
+    """Load the pipeline_output.json skeleton."""
+    if pipeline_path.exists():
+        try:
+            content = pipeline_path.read_text(encoding="utf-8").strip()
+            if content:
+                return json.loads(content)
+        except Exception as e:
+            print(f"  Warning: Could not parse {pipeline_path.name}: {e}")
+    return {"skeleton": {"sections": []}}
 
+
+def _find_section_in_skeleton(skeleton: dict, section_id: str) -> dict | None:
+    """Find a section or subsection by section_id in the skeleton."""
+    for sec in skeleton.get("skeleton", {}).get("sections", []):
+        if sec.get("section_id") == section_id:
+            return sec
+        for sub in sec.get("subsections", []):
+            if sub.get("section_id") == section_id:
+                return sub
+    return None
+
+
+def _make_check_entry(checklist_name: str, status: str, errors: list, findings: str) -> dict:
+    """Build a single check entry in the skeleton format."""
+    return {
+        "check_name": "Requirement Coverage Validator",
+        "validation_results": [
+            {
+                "checklist_name": checklist_name,
+                "status": status,
+                "error_count": len(errors),
+                "errors": errors,
+                "findings": findings if findings else ("Issues found." if errors else "No findings."),
+            }
+        ],
+    }
+
+
+def _make_error(msg: str, where: str, severity: str = "High",
+                err_type: str = "COVERAGE_GAP", suggestion: str = "",
+                redirect_text: str = "", what: str = "") -> dict:
+    return {
+        "where": where,
+        "what": what or msg,
+        "suggestion": suggestion,
+        "redirect_text": redirect_text or where,
+        "severity": severity,
+    }
+
+
+# ---------------------------------------------------------------------------
+# TOP-LEVEL CHECKS SUMMARY
+# ---------------------------------------------------------------------------
+
+def _populate_top_level_checks(skeleton: dict) -> None:
+    """
+    Scan all sections and subsections for 'Requirement Coverage Validator' checks.
+    Each unique checklist_name appears ONCE. If any occurrence is FAIL, the
+    overall entry is marked FAIL; otherwise PASS.
+    """
+    inner = skeleton.get("skeleton", skeleton)
+    status_map: Dict[str, str] = {}
+
+    def _collect(checks):
+        for check in checks:
+            if check.get("check_name") == "Requirement Coverage Validator":
+                for vr in check.get("validation_results", []):
+                    name = vr.get("checklist_name", "")
+                    status = str(vr.get("status", "")).upper()
+                    if not name:
+                        continue
+                    if status_map.get(name, "PASS") != "FAIL":
+                        status_map[name] = status
+
+    for sec in inner.get("sections", []):
+        _collect(sec.get("checks", []))
+        for sub in sec.get("subsections", []):
+            _collect(sub.get("checks", []))
+
+    entries = [f"{name} - {status}" for name, status in status_map.items()]
+
+    inner["checks"] = [
+        {
+            "check_name": "Requirement Coverage Validator",
+            "total_checklist_name": entries,
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
+# INJECT RESULTS INTO PIPELINE OUTPUT
+# ---------------------------------------------------------------------------
+
+def inject_coverage_into_skeleton(skeleton: dict, coverage_result: dict) -> None:
+    """Inject Coverage Validation results into section_8_1 of the skeleton."""
+    sec_81 = _find_section_in_skeleton(skeleton, "section_8_1")
+    if not sec_81:
+        print("  WARNING: section_8_1 not found in skeleton, skipping coverage injection")
+        return
+
+    errors = []
+    missing = coverage_result.get("missing_coverage_summary", [])
+    if not isinstance(missing, list):
+        missing = [str(missing)] if missing else []
+
+    for item in missing:
+        if item:
+            errors.append(_make_error(
+                msg=str(item),
+                where="8.1. Number of Test Scenarios",
+                what="Coverage Validation across Section 8 and 11",
+                suggestion=str(item),
+                redirect_text="Number of Test Scenarios",
+            ))
+
+    result_status = coverage_result.get("result", "FAIL")
+    status = "PASS" if str(result_status).upper() == "PASS" else "FAIL"
+    findings = "No findings." if status == "PASS" else "Coverage gaps detected."
+
+    check = _make_check_entry("Coverage Validation", status, errors, findings)
+    sec_81["checks"] = [c for c in sec_81.get("checks", [])
+                        if c.get("check_name") != "Requirement Coverage Validator"
+                        or not any(vr.get("checklist_name") == "Coverage Validation"
+                                   for vr in c.get("validation_results", []))]
+    sec_81["checks"].append(check)
+
+
+def inject_scope_per_scenario(skeleton: dict, gap_result: dict, health: dict) -> None:
+    """Inject Scope Validation results per Section 11 subsection."""
+    cases_11 = health["raw_11"]
+    gaps = gap_result.get("gap_assessment", {})
+
+    for idx, tc in enumerate(cases_11):
+        heading = tc.get("test_case_heading", "").strip()
+        sub_id = f"section_11_{idx + 1}"
+        sub_sec = _find_section_in_skeleton(skeleton, sub_id)
+        if not sub_sec:
+            continue
+
+        gap_entry = gaps.get(heading, {})
+        deviation = gap_entry.get("deviation_summary", "").strip() if isinstance(gap_entry, dict) else ""
+
+        if deviation:
+            errors = [_make_error(
+                msg=deviation,
+                where=heading,
+                err_type="OUT_OF_SCOPE",
+                severity="Medium",
+                what="Scope Validation across Section 8 and 11",
+                suggestion=deviation,
+                redirect_text=heading,
+            )]
+            status = "FAIL"
+            findings = "Out-of-scope test case detected."
+        else:
+            errors = []
+            status = "PASS"
+            findings = "No findings."
+
+        check = _make_check_entry("Scope Validation", status, errors, findings)
+        sub_sec["checks"] = [c for c in sub_sec.get("checks", [])
+                             if c.get("check_name") != "Requirement Coverage Validator"
+                             or not any(vr.get("checklist_name") == "Scope Validation"
+                                        for vr in c.get("validation_results", []))]
+        sub_sec["checks"].append(check)
+
+
+def inject_scope_combined_into_81(skeleton: dict, gap_result: dict) -> None:
+    """Inject combined Scope Validation results into section_8_1."""
+    sec_81 = _find_section_in_skeleton(skeleton, "section_8_1")
+    if not sec_81:
+        return
+
+    gaps = gap_result.get("gap_assessment", {})
+    errors = []
+    for heading, entry in gaps.items():
+        if not isinstance(entry, dict):
+            continue
+        deviation = entry.get("deviation_summary", "").strip()
+        where_val = entry.get("section81_key", heading)
+
+        if deviation:
+            errors.append(_make_error(
+                msg=deviation,
+                where=where_val,
+                err_type="OUT_OF_SCOPE",
+                severity="Medium",
+                what="Scope Validation across Section 8 and 11",
+                suggestion=deviation,
+                redirect_text=where_val,
+            ))
+
+    status = "FAIL" if errors else "PASS"
+    findings = "Out-of-scope test cases detected." if errors else "No findings."
+
+    check = _make_check_entry("Scope Validation", status, errors, findings)
+    sec_81["checks"] = [c for c in sec_81.get("checks", [])
+                        if c.get("check_name") != "Requirement Coverage Validator"
+                        or not any(vr.get("checklist_name") == "Scope Validation"
+                                   for vr in c.get("validation_results", []))]
+    sec_81["checks"].append(check)
+
+
+def inject_error_into_81(skeleton: dict, message: str) -> None:
+    """Inject a simple error message into section_8_1."""
+    sec_81 = _find_section_in_skeleton(skeleton, "section_8_1")
+    if not sec_81:
+        return
+
+    errors = [_make_error(
+        msg=message,
+        where="8.1. Number of Test Scenarios",
+        err_type="VALIDATION_BLOCKED",
+        severity="High",
+        what="Coverage Validation",
+        suggestion=message,
+        redirect_text="Number of Test Scenarios",
+    )]
+    check = _make_check_entry("Coverage Validation", "FAIL", errors, message)
+    sec_81["checks"] = [c for c in sec_81.get("checks", [])
+                        if c.get("check_name") != "Requirement Coverage Validator"]
+    sec_81["checks"].append(check)
+
+
+
+def extract_scenarios(structured_json: dict) -> list:
+    """
+    Positional extraction:
+    - Section 8.1  -> descriptions (ORDER SOURCE)
+    - Section 8.4  -> steps (PRIMARY)
+    - Section 11   -> fallback steps + OUTPUT KEYS (exact test_case_heading strings)
+    
+    All mapping is purely positional (index-based). No ID matching.
+    """
+
+    def normalize_title(title: str) -> str:
+        return re.sub(r'[^a-z0-9]', '', title.lower())
+
+    scenarios_81: list = []   # [{description}]
+    steps_84: list = []       # [steps[]]
+    cases_11: list = []       # [steps[]]
+    section11_keys: list = [] # exact test_case_heading strings from Section 11
+
+    # ------------------------------------------------------------------ #
+    # Extract all three sections
+    # ------------------------------------------------------------------ #
+    for section in structured_json.get("sections", []):
+        title_norm = normalize_title(section.get("title", ""))
+
+        # ---- Section 8.1: Number of Test Scenarios ----
+        if "numberoftestscenarios" in title_norm:
+            for ts in section.get("test_scenarios", []):
+                scenarios_81.append({
+                    "description": ts.get("description", ""),
+                    "test_scenario": ts.get("test_scenario", "")
+                })
+
+        # ---- Section 8.4: Test Execution Steps ----
+        elif "testexecutionsteps" in title_norm:
+            for item in section.get("execution_steps", []):
+                steps_84.append(item.get("steps", []))
+
+        # ---- Section 11: Test Execution (actual executed cases) ----
+        elif "testexecution" in title_norm:
+            for tc in section.get("test_cases", []):
+                # EXACT string — no transformation
+                section11_keys.append(tc.get("test_case_heading", "").strip())
+                steps = [
+                    s for s in tc.get("execution", [])
+                    if isinstance(s, dict) and "step" in s
+                ]
+                cases_11.append(steps)
+
+    # ------------------------------------------------------------------ #
+    # Validations
+    # ------------------------------------------------------------------ #
+    if not scenarios_81:
+        raise ValueError("Section 8.1 not found or empty")
+
+    if steps_84 and len(steps_84) != len(scenarios_81):
+        print(f"WARNING: 8.1 has {len(scenarios_81)} scenarios but 8.4 has {len(steps_84)} steps")
+
+    if section11_keys and len(section11_keys) != len(scenarios_81):
+        print(f"WARNING: Section 11 has {len(section11_keys)} cases but 8.1 has {len(scenarios_81)} scenarios")
+
+    # ------------------------------------------------------------------ #
+    # Positional mapping
+    # ------------------------------------------------------------------ #
     combined = []
     count = len(scenarios_81)
 
     for i in range(count):
-        desc = scenarios_81[i].get("description", "") if i < len(scenarios_81) else ""
-        
-        # Capture the original test scenario label from 8.1
-        s81_key = scenarios_81[i].get("test_scenario", f"Test Scenario {i + 1}") if i < len(scenarios_81) else f"Test Scenario {i + 1}"
-
-        steps = []
-        if i < len(steps_84):
-            steps = steps_84[i].get("steps", [])
-        elif i < len(cases_11):
-            tc = cases_11[i]
-            steps = [s for s in tc.get("execution", []) if isinstance(s, dict) and "step" in s]
-
-        s11_key = None
-        if i < len(cases_11):
-            s11_key = cases_11[i].get("test_case_heading", "").strip() or None
-
+        s81_key = scenarios_81[i].get("test_scenario")
+        if not s81_key:
+            s81_key = f"Test Scenario {i + 1}"
+            
         combined.append({
-            "tid": f"Test Scenario {i + 1}",
-            "description": desc,
-            "steps": steps,
-            "section11_key": s11_key,
-            "section81_key": s81_key,
+            "tid": f"Test Scenario {i + 1}",   # internal label for LLM only
+            "description": scenarios_81[i]["description"],
+            "steps": (
+                steps_84[i] if i < len(steps_84)
+                else cases_11[i] if i < len(cases_11)
+                else []
+            ),
+            "section11_key": (
+                section11_keys[i] if i < len(section11_keys)
+                else None   # STRICT: no synthetic fallback
+            ),
+            "section81_key": s81_key
         })
 
+    # Mapping confirmation
+    for i, c in enumerate(combined):
+        print(f"[MAP] {i + 1} -> {c['section11_key']}")
+
     return combined
+
 
 
 
@@ -301,7 +618,6 @@ def _format_scenario_for_prompt(scenario: dict) -> dict:
 
 def summarize_scenarios_in_pairs(
     scenarios: list,
-    user_answers: Dict[str, Any],
     llm_endpoint: str,
     llm_model: str,
 ) -> list:
@@ -310,6 +626,7 @@ def summarize_scenarios_in_pairs(
     If the last chunk has only 1 scenario, send it alone with a single-item prompt.
     Returns a combined list of {test_case_id, test_case_summary} dicts.
     """
+
     all_summaries = []
 
     for i in range(0, len(scenarios), 2):
@@ -326,8 +643,20 @@ def summarize_scenarios_in_pairs(
         # Render all placeholders
         render_values = {"test_scenarios": payload_json}
         prompt_text = render_prompt(prompt, render_values)
-        messages = _parse_chatml(prompt_text)
+        messages = _parse_prompt_sections(prompt_text)
 
+        # --- CLI: Print rendered summarization prompt ---
+        pair_ids = [s.get("tid", "?") for s in pair]
+        print(f"\n{'='*60}")
+        print(f"SUMMARIZATION PROMPT [{', '.join(pair_ids)}]")
+        print(f"{'='*60}")
+        for msg in messages:
+            print(f"[{msg['role'].upper()}]")
+            print(msg["content"])
+            print()
+        print(f"{'='*60}\n")
+
+        llm_endpoint = llm_endpoint.strip()
         if llm_endpoint.endswith("/api/generate"):
             response_text = _ollama_generate(llm_endpoint, llm_model, messages)
         elif llm_endpoint.endswith("/v1/chat/completions"):
@@ -337,23 +666,24 @@ def summarize_scenarios_in_pairs(
                 "Unsupported LLM endpoint. Use /api/generate or /v1/chat/completions"
             )
 
-        pair_ids = [s.get("tid", "?") for s in pair]
-
-        # Print raw LLM response for this batch
-        print(f"\n--- Summarization Response: {', '.join(pair_ids)} ---")
+        # --- CLI: Print raw LLM response ---
+        print(f"\n{'-'*60}")
+        print(f"SUMMARIZATION RESPONSE [{', '.join(pair_ids)}]")
+        print(f"{'-'*60}")
         print(response_text)
-        print(f"--- End Response ---\n")
+        print(f"{'-'*60}\n")
 
         parsed = _extract_json(response_text)
         batch_summaries = parsed.get("test_summary", [])
 
         if len(batch_summaries) < len(pair):
+            pair_ids = [s.get("tid", "?") for s in pair]
             print(f"  WARNING: Expected {len(pair)} summaries but got {len(batch_summaries)} for: {', '.join(pair_ids)}")
 
         all_summaries.extend(batch_summaries)
 
+        pair_ids = [s.get("tid", "?") for s in pair]
         print(f"  Summarized: {', '.join(pair_ids)}")
-
 
     return all_summaries
 
@@ -370,30 +700,14 @@ def load_structured_json(structured_json: StructuredInput) -> Dict[str, Any]:
 
 
 def build_prompt(
-    user_answers: Dict[str, str],
     test_scenario_summaries: str,
     test_scenarios_text: str,
 ) -> str:
-    # Select focused prompt based on pre-decided account creation flag
-    # user_account_creation=True  → dynamic accounts → Prompt YES (C1-C6)
-    # user_account_creation=False → predefined only  → Prompt NO  (C1,C5,C6,C7)
-    if user_answers.get("user_account_creation", False):
-        prompt_template = COVERAGE_VALIDATOR_PROMPT_YES
-        print("[PROMPT ROUTE] user_account_creation=YES -> COVERAGE_VALIDATOR_PROMPT_YES")
-    else:
-        prompt_template = COVERAGE_VALIDATOR_PROMPT_NO
-        print("[PROMPT ROUTE] user_account_creation=NO  -> COVERAGE_VALIDATOR_PROMPT_NO")
-
-    machine_accounts = "TRUE" if user_answers.get("machine_accounts_supported") else "FALSE"
+    prompt_template = COVERAGE_VALIDATOR_PROMPT
 
     payload = {
         "test_scenario_summaries": test_scenario_summaries,
         "test_scenarios": test_scenarios_text,
-        "machine_accounts_supported": machine_accounts,
-        # Legacy field kept for gap analyzer compatibility
-        "account_mode": user_answers.get("account_mode", "predefined/factory user accounts"),
-        # YES/NO flags used in both prompts
-        "predefined/factory_user_accounts": user_answers.get("predefined/factory_user_accounts", "YES"),
     }
 
     return render_prompt(prompt_template, payload)
@@ -401,7 +715,6 @@ def build_prompt(
 
 def run_gap_analysis(
     scenarios: list,
-    user_answers: Dict[str, Any],
     llm_endpoint: str,
     llm_model: str,
 ) -> Dict[str, Any]:
@@ -409,6 +722,7 @@ def run_gap_analysis(
     Run gap analysis on each scenario.
     Displays a preview of the final prompt in the CLI for the first case.
     """
+
     all_gaps = {}
     count = len(scenarios)
 
@@ -427,34 +741,20 @@ def run_gap_analysis(
             print(f"  [WARN] No Section 11 key for {tid} "
                   f"(s11 degraded) -> using fallback key: '{section_11_id}'")
 
-        render_values = {
-            "test_case_id": tid,
-            "test_case_name": name,
-            "account_mode": user_answers.get("account_mode", "predefined/factory user accounts"),
-            "machine_accounts_supported": "TRUE" if user_answers.get("machine_accounts_supported") else "FALSE",
-            "predefined_user_accounts": user_answers.get("predefined/factory_user_accounts", "YES"),
-            "dynamic_user_accounts": user_answers.get("dynamic_user_accounts", "NO"),
-        }
+        render_values = {}
+        render_values["test_case_id"] = tid
+        render_values["test_scenario"] = name
 
-        # Select prompt based on user_account_creation flag
-        if user_answers.get("user_account_creation", False):
-            gap_prompt = GAP_ANALYZER_PROMPT_SUPPORTED
-        else:
-            gap_prompt = GAP_ANALYZER_PROMPT_NOT_SUPPORTED
+        prompt_text = render_prompt(GAP_ANALYZER_PROMPT_TEMPLATE, render_values)
+        messages = _parse_prompt_sections(prompt_text)
 
-        prompt_text = render_prompt(gap_prompt, render_values)
-        messages = _parse_chatml(prompt_text)
-
+        llm_endpoint = llm_endpoint.strip()
         if llm_endpoint.endswith("/api/generate"):
             response_text = _ollama_generate(llm_endpoint, llm_model, messages)
         elif llm_endpoint.endswith("/v1/chat/completions"):
             response_text = _openai_chat_completions(llm_endpoint, llm_model, messages)
         else:
             raise ValueError("Unsupported LLM endpoint")
-
-        print(f"\n--- Gap Analysis Response: {tid} ---")
-        print(response_text)
-        print("--- End Response ---\n")
 
         parsed = _extract_json(response_text)
 
@@ -466,9 +766,13 @@ def run_gap_analysis(
             entry = parsed
 
         if entry:
+            dev_sum = entry.get("deviation_summary", "")
+            if isinstance(dev_sum, list):
+                dev_sum = " ".join(str(i) for i in dev_sum)
+                
             all_gaps[section_11_id] = {
                 "test_case_name": entry.get("test_case_name", name),
-                "deviation_summary": entry.get("deviation_summary", ""),
+                "deviation_summary": dev_sum.strip(),
                 "section81_key": s.get("section81_key", tid)
             }
 
@@ -478,17 +782,16 @@ def run_gap_analysis(
     return {"gap_assessment": all_gaps}
 
 
-
 def _ollama_generate(endpoint: str, model: str, prompt_or_messages: Union[str, List[Dict[str, str]]]) -> str:
     """
     Call Ollama /api/generate. 
-    If a list of messages is provided, they are joined with ChatML tags.
+    If a list of messages is provided, they are joined as role-labeled sections.
     """
     if isinstance(prompt_or_messages, list):
-        # Join messages with ChatML tags to pass as single prompt to /api/generate
+        # Join messages as role-labeled sections for single prompt
         full_prompt = ""
         for msg in prompt_or_messages:
-            full_prompt += f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
+            full_prompt += f"[{msg['role'].upper()}]\n{msg['content']}\n\n"
         prompt = full_prompt.strip()
     else:
         prompt = prompt_or_messages
@@ -499,8 +802,6 @@ def _ollama_generate(endpoint: str, model: str, prompt_or_messages: Union[str, L
         "stream": False,
         "options": {
             "temperature": 0,
-            "top_p": 0.9, # Note: Ollama top_p is usually 0.0-1.0
-            "num_predict": 512,
         },
     }
     data = json.dumps(payload).encode("utf-8")
@@ -538,9 +839,6 @@ def _openai_chat_completions(endpoint: str, model: str, prompt_or_messages: Unio
     Call OpenAI-compatible /v1/chat/completions.
     Supports either a raw string (wrapped as user message) or a list of
     role-separated message dicts sent as proper API messages.
-
-    If the last message has role "assistant" (a prefill/primer, e.g. "{"),
-    it is prepended back to the model response since the API does not echo it.
     """
     if isinstance(prompt_or_messages, list):
         # Send as proper role-separated messages in the API
@@ -548,17 +846,11 @@ def _openai_chat_completions(endpoint: str, model: str, prompt_or_messages: Unio
     else:
         messages = [{"role": "user", "content": prompt_or_messages}]
 
-    # Detect assistant prefill: the model continues from this prefix
-    # but does NOT include it in the returned content — prepend it back.
-    assistant_prefix = ""
-    if messages and messages[-1].get("role") == "assistant":
-        assistant_prefix = messages[-1].get("content", "")
-
     payload = {
         "model": model,
         "messages": messages,
         "temperature": 0,
-        "max_tokens": 11000,
+        "max_tokens": 1024,
     }
     data = json.dumps(payload).encode("utf-8")
     
@@ -583,11 +875,7 @@ def _openai_chat_completions(endpoint: str, model: str, prompt_or_messages: Unio
             choices = result.get("choices", [])
             if not choices:
                 return ""
-            content = str(choices[0].get("message", {}).get("content", ""))
-            # Reconstruct full response when an assistant prefix was used
-            if assistant_prefix and not content.lstrip().startswith(assistant_prefix.strip()):
-                content = assistant_prefix + content
-            return content
+            return str(choices[0].get("message", {}).get("content", ""))
         except error.HTTPError as e:
             if attempt == max_retries - 1:
                 raise
@@ -730,242 +1018,6 @@ def _extract_json(text: str) -> Dict[str, Any]:
     print(f"[DEBUG] Raw response (first 200 chars):\n{original_text[:200]}")
     raise ValueError(f"LLM output does not contain valid JSON. See {debug_file.name} for details.")
 
-
-# ---------------------------------------------------------------------------
-# PIPELINE OUTPUT SKELETON HELPERS
-# ---------------------------------------------------------------------------
-
-def _load_pipeline_skeleton(pipeline_path: Path) -> dict:
-    """Load the pipeline_output.json skeleton."""
-    if pipeline_path.exists():
-        try:
-            content = pipeline_path.read_text(encoding="utf-8").strip()
-            if content:
-                return json.loads(content)
-        except Exception as e:
-            print(f"  Warning: Could not parse {pipeline_path.name}: {e}")
-    return {"skeleton": {"sections": []}}
-
-
-def _find_section_in_skeleton(skeleton: dict, section_id: str) -> dict | None:
-    """Find a section or subsection by section_id in the skeleton."""
-    for sec in skeleton.get("skeleton", {}).get("sections", []):
-        if sec.get("section_id") == section_id:
-            return sec
-        for sub in sec.get("subsections", []):
-            if sub.get("section_id") == section_id:
-                return sub
-    return None
-
-
-def _make_check_entry(checklist_name: str, status: str, errors: list, findings: str) -> dict:
-    """Build a single check entry in the skeleton format."""
-    return {
-        "check_name": "Requirement Coverage Validator",
-        "validation_results": [
-            {
-                "checklist_name": checklist_name,
-                "status": status,
-                "error_count": len(errors),
-                "errors": errors,
-                "findings": findings if findings else ("Issues found." if errors else "No findings."),
-            }
-        ],
-    }
-
-
-def _make_error(msg: str, where: str, severity: str = "High",
-                err_type: str = "COVERAGE_GAP", suggestion: str = "",
-                redirect_text: str = "", what: str = "") -> dict:
-    return {
-        "where": where,
-        "what": what or msg,
-        "suggestion": suggestion,
-        "redirect_text": redirect_text or where,
-        "severity": severity,
-    }
-
-
-# ---------------------------------------------------------------------------
-# TOP-LEVEL CHECKS SUMMARY
-# ---------------------------------------------------------------------------
-
-def _populate_top_level_checks(skeleton: dict) -> None:
-    """
-    Scan all sections and subsections for 'Requirement Coverage Validator' checks.
-    Each unique checklist_name appears ONCE. If any occurrence is FAIL, the
-    overall entry is marked FAIL; otherwise PASS.
-      [{"check_name": "Requirement Coverage Validator",
-        "total_checklist_name": ["Coverage Validation - PASS",
-                                  "Scope Validation - FAIL"]}]
-    """
-    inner = skeleton.get("skeleton", skeleton)
-    # Track: checklist_name -> worst status (FAIL beats PASS)
-    status_map: Dict[str, str] = {}
-
-    def _collect(checks):
-        for check in checks:
-            if check.get("check_name") == "Requirement Coverage Validator":
-                for vr in check.get("validation_results", []):
-                    name = vr.get("checklist_name", "")
-                    status = str(vr.get("status", "")).upper()
-                    if not name:
-                        continue
-                    # FAIL wins over PASS
-                    if status_map.get(name, "PASS") != "FAIL":
-                        status_map[name] = status
-
-    for sec in inner.get("sections", []):
-        _collect(sec.get("checks", []))
-        for sub in sec.get("subsections", []):
-            _collect(sub.get("checks", []))
-
-    entries = [f"{name} - {status}" for name, status in status_map.items()]
-
-    inner["checks"] = [
-        {
-            "check_name": "Requirement Coverage Validator",
-            "total_checklist_name": entries,
-        }
-    ]
-
-
-# ---------------------------------------------------------------------------
-# INJECT RESULTS INTO PIPELINE OUTPUT
-# ---------------------------------------------------------------------------
-
-def inject_coverage_into_skeleton(skeleton: dict, coverage_result: dict) -> None:
-    """Inject Coverage Validation results into section_8_1 of the skeleton."""
-    sec_81 = _find_section_in_skeleton(skeleton, "section_8_1")
-    if not sec_81:
-        print("  WARNING: section_8_1 not found in skeleton, skipping coverage injection")
-        return
-
-    errors = []
-    missing = coverage_result.get("missing_coverage_summary", [])
-    if not isinstance(missing, list):
-        missing = [str(missing)] if missing else []
-
-    for item in missing:
-        if item:  # skip empty strings (PASS case)
-            errors.append(_make_error(
-                msg=str(item),
-                where="8.1. Number of Test Scenarios",
-                what="Coverage Validation across Section 8 and 11",
-                suggestion=str(item),
-                redirect_text="Number of Test Scenarios",
-            ))
-
-    result_status = coverage_result.get("result", "FAIL")
-    status = "PASS" if str(result_status).upper() == "PASS" else "FAIL"
-    findings = "No findings." if status == "PASS" else "Coverage gaps detected."
-
-    check = _make_check_entry("Coverage Validation", status, errors, findings)
-    sec_81["checks"] = [c for c in sec_81.get("checks", [])
-                        if c.get("check_name") != "Requirement Coverage Validator"
-                        or not any(vr.get("checklist_name") == "Coverage Validation"
-                                   for vr in c.get("validation_results", []))]
-    sec_81["checks"].append(check)
-
-
-def inject_scope_per_scenario(skeleton: dict, gap_result: dict, health: dict) -> None:
-    """Inject Scope Validation results per Section 11 subsection."""
-    cases_11 = health["raw_11"]
-    gaps = gap_result.get("gap_assessment", {})
-
-    for idx, tc in enumerate(cases_11):
-        heading = tc.get("test_case_heading", "").strip()
-        sub_id = f"section_11_{idx + 1}"
-        sub_sec = _find_section_in_skeleton(skeleton, sub_id)
-        if not sub_sec:
-            continue
-
-        gap_entry = gaps.get(heading, {})
-        deviation = gap_entry.get("deviation_summary", "").strip() if isinstance(gap_entry, dict) else ""
-
-        if deviation:
-            errors = [_make_error(
-                msg=deviation,
-                where=heading,
-                err_type="OUT_OF_SCOPE",
-                severity="Medium",
-                what="Scope Validation across Section 8 and 11",
-                suggestion=deviation,
-                redirect_text=heading,
-            )]
-            status = "FAIL"
-            findings = "Out-of-scope test case detected."
-        else:
-            errors = []
-            status = "PASS"
-            findings = "No findings."
-
-        check = _make_check_entry("Scope Validation", status, errors, findings)
-        sub_sec["checks"] = [c for c in sub_sec.get("checks", [])
-                             if c.get("check_name") != "Requirement Coverage Validator"
-                             or not any(vr.get("checklist_name") == "Scope Validation"
-                                        for vr in c.get("validation_results", []))]
-        sub_sec["checks"].append(check)
-
-
-def inject_scope_combined_into_81(skeleton: dict, gap_result: dict) -> None:
-    """Inject combined Scope Validation results into section_8_1."""
-    sec_81 = _find_section_in_skeleton(skeleton, "section_8_1")
-    if not sec_81:
-        return
-
-    gaps = gap_result.get("gap_assessment", {})
-    errors = []
-    for heading, entry in gaps.items():
-        if not isinstance(entry, dict):
-            continue
-        deviation = entry.get("deviation_summary", "").strip()
-        # Fallback to the heading (from Section 11) if section81_key is somehow missing
-        where_val = entry.get("section81_key", heading)
-        
-        if deviation:
-            errors.append(_make_error(
-                msg=deviation,
-                where=where_val,
-                err_type="OUT_OF_SCOPE",
-                severity="Medium",
-                what="Scope Validation across Section 8 and 11",
-                suggestion=deviation,
-                redirect_text=where_val,
-            ))
-
-    status = "FAIL" if errors else "PASS"
-    findings = "Out-of-scope test cases detected." if errors else "No findings."
-
-    check = _make_check_entry("Scope Validation", status, errors, findings)
-    sec_81["checks"] = [c for c in sec_81.get("checks", [])
-                        if c.get("check_name") != "Requirement Coverage Validator"
-                        or not any(vr.get("checklist_name") == "Scope Validation"
-                                   for vr in c.get("validation_results", []))]
-    sec_81["checks"].append(check)
-
-
-def inject_error_into_81(skeleton: dict, message: str) -> None:
-    """Inject a simple error message into section_8_1."""
-    sec_81 = _find_section_in_skeleton(skeleton, "section_8_1")
-    if not sec_81:
-        return
-
-    errors = [_make_error(
-        msg=message,
-        where="8.1. Number of Test Scenarios",
-        err_type="VALIDATION_BLOCKED",
-        severity="High",
-        what="Coverage Validation",
-        suggestion=message,
-        redirect_text="Number of Test Scenarios",
-    )]
-    check = _make_check_entry("Coverage Validation", "FAIL", errors, message)
-    sec_81["checks"] = [c for c in sec_81.get("checks", [])
-                        if c.get("check_name") != "Requirement Coverage Validator"]
-    sec_81["checks"].append(check)
-
-
 # ---------------------------------------------------------------------------
 # PIPELINE GAP ASSESSMENT WRITER
 # ---------------------------------------------------------------------------
@@ -1007,18 +1059,17 @@ def _write_gap_to_pipeline(gap_result: dict, pipeline_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# MAIN ORCHESTRATION (NEW DECISION TREE)
+# MAIN ORCHESTRATION (1.1.7 DECISION TREE)
 # ---------------------------------------------------------------------------
 
 def run_validation(
     structured_json: StructuredInput,
-    user_answers: Dict[str, str],
     pipeline_path: Path = None,
     llm_endpoint: str = DEFAULT_LLM_ENDPOINT,
     llm_model: str = DEFAULT_LLM_MODEL,
 ) -> None:
     """
-    New orchestration with 3-section health check:
+    Orchestration with 3-section health check:
     1. Assess health of 8.1, 8.4, 11
     2. Follow decision tree
     3. Inject results into output.json (pipeline_output.json is read-only skeleton)
@@ -1053,7 +1104,7 @@ def run_validation(
         inject_error_into_81(skeleton, msg)
         _populate_top_level_checks(skeleton)
         output_path.write_text(json.dumps(skeleton.get("skeleton", skeleton), indent=2), encoding="utf-8")
-        print(f"Output written → {output_path.name}")
+        print(f"Output written -> {output_path.name}")
         return
 
     # ---- Both 8.1 and 8.4 are healthy (= 0) ----
@@ -1064,11 +1115,11 @@ def run_validation(
         inject_error_into_81(skeleton, msg)
         _populate_top_level_checks(skeleton)
         output_path.write_text(json.dumps(skeleton.get("skeleton", skeleton), indent=2), encoding="utf-8")
-        print(f"Output written → {output_path.name}")
+        print(f"Output written -> {output_path.name}")
         return
 
-    # ---- 8.1 == 8.4 counts match → Run LLM validation ----
-    all_scenarios = extract_scenarios_for_llm(health)
+    # ---- 8.1 == 8.4 counts match -> Run LLM validation ----
+    all_scenarios = extract_scenarios(structured_data)
 
     # Format for coverage prompt
     test_scenarios_lines = [f"- {ts['tid']} {ts['description']}" for ts in all_scenarios]
@@ -1077,7 +1128,7 @@ def run_validation(
 
     # Phase 1: Summarize
     print("Phase 1: Summarizing scenarios in pairs...")
-    summaries = summarize_scenarios_in_pairs(all_scenarios, user_answers, llm_endpoint, llm_model)
+    summaries = summarize_scenarios_in_pairs(all_scenarios, llm_endpoint, llm_model)
     summary_lines = []
     for s in summaries:
         tid = s.get("test_case_id", "Unknown")
@@ -1089,21 +1140,15 @@ def run_validation(
 
     # Phase 2: Coverage validation
     print("Phase 2: Running coverage validation...")
-    coverage_prompt_text = build_prompt(user_answers, test_scenario_summaries, test_scenarios_text)
-
-    print("\n" + "="*60)
-    print("COVERAGE VALIDATOR -- FINAL PROMPT SENT TO LLM")
-    print("="*60)
-    print(coverage_prompt_text)
-    print("="*60 + "\n")
-
-    coverage_messages = _parse_chatml(coverage_prompt_text)
+    coverage_prompt_text = build_prompt(test_scenario_summaries, test_scenarios_text)
+    coverage_messages = _parse_prompt_sections(coverage_prompt_text)
+    llm_endpoint = llm_endpoint.strip()
     if llm_endpoint.endswith("/api/generate"):
         coverage_response = _ollama_generate(llm_endpoint, llm_model, coverage_messages)
     elif llm_endpoint.endswith("/v1/chat/completions"):
         coverage_response = _openai_chat_completions(llm_endpoint, llm_model, coverage_messages)
     else:
-        raise ValueError("Unsupported LLM endpoint")
+        raise ValueError(f"Unsupported LLM endpoint. Got '{llm_endpoint}'")
 
     print("\n--- Coverage Validation Response ---")
     print(coverage_response)
@@ -1119,7 +1164,7 @@ def run_validation(
 
     # Phase 3: Gap analysis (scope validation)
     print("Phase 3: Running gap analysis...")
-    gap_result = run_gap_analysis(all_scenarios, user_answers, llm_endpoint, llm_model)
+    gap_result = run_gap_analysis(all_scenarios, llm_endpoint, llm_model)
 
     # ---- DECISION: Where to inject scope results ----
     if s11 == 0 and health["count_81"] == health["count_11"]:
@@ -1179,12 +1224,11 @@ def _write_intelligence_json(result: Dict[str, Any], output_path: Path) -> None:
 # Argument detection
 # --------------------------------------------------
 
-def detect_all_files(args: list[str]) -> tuple[Path | None, Path | None, Path | None]:
+def detect_all_files(args: list[str]) -> tuple[Path | None, Path | None]:
     """
-    Detect structured_json, answer_json, and pipeline_output_json from a list of paths.
+    Detect structured_json and pipeline_output_json from a list of paths.
     """
     structured = None
-    answer = None
     pipeline = None
     
     for arg in args:
@@ -1194,13 +1238,10 @@ def detect_all_files(args: list[str]) -> tuple[Path | None, Path | None, Path | 
             
         name = path.name.lower()
         
-        # 1. Answer JSON
-        if name == "answer.json":
-            answer = path
-        # 2. Pipeline Output JSON
-        elif name == "pipeline_output.json":
+        # 1. Pipeline Output JSON
+        if name == "pipeline_output.json":
             pipeline = path
-        # 3. Structured JSON
+        # 2. Structured JSON
         elif name.endswith("ai_structured.json") or name.endswith("_structured.json"):
             structured = path
         # Fallback content checks
@@ -1210,14 +1251,12 @@ def detect_all_files(args: list[str]) -> tuple[Path | None, Path | None, Path | 
                 if isinstance(data, dict):
                     if "sections" in data:
                         structured = path
-                    elif "local_management_access_methods" in data or "remote_management_access_methods" in data:
-                        answer = path
-                    elif "gap_assessment" in data or "Protocols" in data:
+                    elif "gap_assessment" in data or "skeleton" in data:
                         pipeline = path
             except:
                 pass
                 
-    return structured, answer, pipeline
+    return structured, pipeline
 
 
 if __name__ == "__main__":
@@ -1225,33 +1264,30 @@ if __name__ == "__main__":
     import traceback
 
     if len(sys.argv) < 2:
-        print("Usage: python main.py <file1.json> [file2.json] [file3.json]")
+        print("Usage: python main.py <structured.json> [pipeline_output.json]")
         sys.exit(1)
 
     # Detect files from all arguments
-    structured_path, answers_path, pipeline_path = detect_all_files(sys.argv[1:])
+    structured_path, pipeline_path = detect_all_files(sys.argv[1:])
     
     if structured_path:
         print(f"Detected structured file: {structured_path.name}")
-    if answers_path:
-        print(f"Detected answer file: {answers_path.name}")
     if pipeline_path:
         print(f"Detected pipeline file: {pipeline_path.name}")
 
-    if not structured_path or not answers_path:
-        print("Error: Could not find both 'structured' and 'answer' files.")
+    if not structured_path:
+        print("Error: Could not find structured JSON file.")
         sys.exit(1)
 
-    user_answers = ensure_answers(load_answers(answers_path))
     pipeline_output_file = pipeline_path if pipeline_path else (BASE_DIR / "pipeline_output.json")
 
     try:
         run_validation(
             structured_path,
-            user_answers,
             pipeline_path=pipeline_output_file,
         )
     except Exception as e:
         print(f"Error: {type(e).__name__}: {e}")
         traceback.print_exc()
         sys.exit(1)
+

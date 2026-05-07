@@ -1,0 +1,22 @@
+{
+  "questions": [
+    {
+      "id": "lan_supported",
+      "label": "Does the DUT support LAN authenticated user sessions?",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "id": "wifi_supported",
+      "label": "Does the DUT support Wi-Fi authenticated user sessions?",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "id": "authentication_interfaces",
+      "label": "List all interfaces and access methods where authentication and session management are supported on the DUT.",
+      "type": "list",
+      "required": true
+    }
+  ]
+}

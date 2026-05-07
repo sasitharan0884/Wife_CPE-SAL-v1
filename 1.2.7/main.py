@@ -21,16 +21,145 @@ BASE_DIR = Path(__file__).parent
 # ---------------------------------------------------------------------------
 
 # Injected from MuruganAI Runner Environment Variables (No Hardcoded Values)
-
-
-DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.142.5:30203/v1/chat/completions")
+DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.138.153:30252/v1/chat/completions")
 DEFAULT_LLM_MODEL = os.environ.get("DYNAMIC_LLM_MODEL", "sorc/qwen3.5-instruct:latest")
 DEFAULT_VL_MODEL = os.environ.get("DYNAMIC_VLM_MODEL") or os.environ.get("DYNAMIC_LLM_MODEL") or "sorc/qwen3.5-instruct:latest"
-DEFAULT_LLM_BEARER_TOKEN = os.environ.get("DYNAMIC_LLM_BEARER_TOKEN") or os.environ.get("DYNAMIC_LLM_API_KEY") or "fe83463d7f7b8a391bf9bd9d68fe65c9daf12b0529bdd4ee1fec36aa51e74134"
+DEFAULT_LLM_BEARER_TOKEN = os.environ.get("DYNAMIC_LLM_BEARER_TOKEN") or os.environ.get("DYNAMIC_LLM_API_KEY") or "e4cb8ddb3bf23c4f8b90d7e1d2b75be424ac3a96ecafb1e5ad8c4d44647eeb75"
+
+# DEFAULT_LLM_ENDPOINT = "http://109.165.137.118:30203/v1/chat/completions"
+# DEFAULT_LLM_MODEL = "sorc/qwen3.5-instruct:latest"
+# DEFAULT_VL_MODEL = "sorc/qwen3.5-instruct:latest"
+# DEFAULT_LLM_BEARER_TOKEN = "c6ca1fd71fb3a5e5e20b3a9c0c5a5558ecebeb6738df6bfdfa0911c127947edb"
 StructuredInput = Union[Dict[str, Any], str, Path]
 
+GAP_ANALYZER_PROMPT_TEMPLATE = """
+--- OUT_OF_SCOPE_VALIDATOR_PROMPT ---
+SYSTEM
+======
+You are a TELECOM TEST PLAN VALIDATOR specializing
+in TSTP (Test Schedule and Test Procedure) evaluation for
+telecom security.
 
-def load_prompts() -> Dict[str, str]: 
+Your task is to verify whether the provided TEST SCENARIOS
+contain test cases that are within scope for password masking
+validation across the declared authentication access methods.
+
+You MUST evaluate scope based STRICTLY on test design
+intent (TSTP) — NOT on execution outcome, system behavior,
+or implementation correctness.
+DO NOT evaluate:
+  * Test execution results or pass/fail outcomes
+  * Execution feasibility or system constraints
+  * Implementation-level correctness
+  * Keyword presence alone without design intent
+DO NOT classify test cases as aligned or not aligned.
+DO NOT introduce interfaces not explicitly declared.
+
+=================================================
+INPUTS
+======
+Authentication Access Methods:
+{authentication_access_methods}
+
+Test Scenario:
+{test_scenario}
+
+=================================================
+SCOPE CONSTRAINT (STRICT)
+=========================
+All validation MUST be strictly limited to the access methods
+explicitly declared in: {authentication_access_methods}
+
+DO NOT infer, assume, or introduce additional interfaces
+beyond what is explicitly listed.
+
+=================================================
+VALIDATION STEP
+-------------------------------------------------------
+CHECK 1 — ACCESS METHOD MATCH
+------------------------------
+Objective:
+Verify that all access methods referenced in the test case are within the declared Authentication Access Methods ({authentication_access_methods}).
+
+Validation Logic:
+
+Extract all access methods mentioned in the test case.
+Compare them against the declared list: {authentication_access_methods}.
+
+Important note: 
+The Access method needed to be Explicitly mentioned in the Test Scenario  
+Assumption is not allowed
+
+Decision Rule:
+
+If ALL extracted access methods are present in {authentication_access_methods}:
+set access_method_scope = PASS
+If ANY extracted access method is NOT present in {authentication_access_methods}:
+set access_method_scope = FAIL
+
+
+-------------------------------------------------------
+CHECK 2 — PROTECTED AUTHENTICATION FEEDBACK INTENT
+---------------------------------------------------
+Objective:
+Verify that the test case name clearly indicates validation of protection of authentication feedback, specifically that password input characters are visually obscured (masked) during active entry on the login interface.
+
+Validation Logic:
+
+Analyze the test case name for intent related to password masking/obscuring.
+
+Decision Rule:
+
+If the test case name validates password masking/obscuring intent.
+
+a) AND the intent is explicitly tied to login/authentication entry context.
+→ set feedback_scope = PASS
+
+b) BUT the masking intent refers to non-authentication contexts such as:
+- password change screens
+- configuration interfaces
+- stored credentials display
+- transmission/security (encryption)
+- post-login UI
+
+ → set feedback_scope = FAIL
+
+If NO password masking/obscuring intent is present in the test case name:
+→ set feedback_scope = FAIL
+
+=================================================
+FINAL DECISION
+==============
+IF access_method_scope = PASS and feedback_scope = PASS → result = "IN-SCOPE"
+IF access_method_scope = FAIL or feedback_scope = FAIL → result = "OUT-OF-SCOPE"
+
+=================================================
+DEVIATION SUMMARY RULE
+=================================================
+If result = "OUT-OF-SCOPE":
+    deviation_summary must:
+    * be a concise statement explaining WHY the test case is OUT-OF-SCOPE.
+    * focus on the intent and the scope.
+    * NOT mention internal check IDs (e.g., access_method_scope, feedback_scope).
+    * NOT use technical PASS/FAIL terminology.
+
+If result = "IN-SCOPE":
+    deviation_summary = []
+
+=================================================
+OUTPUT FORMAT
+=================================================
+Return ONLY valid JSON. No explanation.
+{ 
+"access_method_scope": "PASS | FAIL",
+"feedback_scope": "PASS | FAIL",
+  "result": "IN-SCOPE | OUT-OF-SCOPE",
+  "deviation_summary": [
+    "<Specific out-of-scope reason per interface. Empty if PASS>"
+  ]
+}"""
+
+def load_prompts() -> Dict[str, str]:
     content = (BASE_DIR / "prompt.txt").read_text(encoding="utf-8")
     prompts = {}
     current_name = None
@@ -117,45 +246,75 @@ def _normalize_bool(value: Any) -> bool:
 
 
 def ensure_answers(answers: Dict[str, Any]) -> Dict[str, Any]:
-    required_keys = [
-        "user_account_creation",
-        "machine_accounts_supported",
-    ]
-    missing = [key for key in required_keys if key not in answers]
-    if missing:
-        raise ValueError(f"Missing required keys in answer.json: {', '.join(missing)}")
-
     normalized = dict(answers)
 
-    normalized["machine_accounts_supported"] = _normalize_bool(answers.get("machine_accounts_supported"))
+    auth_methods = _normalize_list(answers.get("authentication_access_methods"))
 
-    # Derive YES/NO flags from user_account_creation boolean
-    # TRUE  → DUT supports dynamic account creation → dynamic=YES, predefined=NO
-    # FALSE → DUT uses predefined/factory accounts only → dynamic=NO, predefined=YES
-    user_account_creation = _normalize_bool(answers.get("user_account_creation", False))
-    normalized["user_account_creation"] = user_account_creation
+    # Deduplicate while preserving order.
+    deduped_methods: list[str] = []
+    seen_methods = set()
+    for method in auth_methods:
+        key = method.lower()
+        if key not in seen_methods:
+            deduped_methods.append(method)
+            seen_methods.add(key)
 
-    if user_account_creation:
-        normalized["dynamic_user_accounts"] = "YES"
-        normalized["predefined/factory_user_accounts"] = "NO"
-        normalized["account_mode"] = "dynamic user accounts"
-    else:
-        normalized["dynamic_user_accounts"] = "NO"
-        normalized["predefined/factory_user_accounts"] = "YES"
-        normalized["account_mode"] = "predefined/factory user accounts"
+    normalized["authentication_access_methods"] = deduped_methods
 
     return normalized
+
+
+def load_questions(questions_path: Path) -> Dict[str, Any]:
+    if not questions_path.exists():
+        return {"questions": []}
+    return json.loads(questions_path.read_text(encoding="utf-8"))
+
+
+def validate_answers_against_questions(
+    answers: Dict[str, Any], questions_data: Dict[str, Any]
+) -> List[str]:
+    missing_messages: List[str] = []
+    questions = questions_data.get("questions", [])
+
+    for q in questions:
+        qid = q.get("id")
+        label = q.get("label", qid)
+        required = bool(q.get("required", False))
+        show_if = q.get("show_if", {})
+
+        # Respect conditional questions (show_if).
+        should_validate = True
+        if isinstance(show_if, dict):
+            for key, expected in show_if.items():
+                if answers.get(key) != expected:
+                    should_validate = False
+                    break
+
+        if not required or not should_validate:
+            continue
+
+        value = answers.get(qid)
+        is_missing = False
+
+        if value is None:
+            is_missing = True
+        elif isinstance(value, str) and not value.strip():
+            is_missing = True
+        elif isinstance(value, list) and len([v for v in value if str(v).strip()]) == 0:
+            is_missing = True
+
+        if is_missing:
+            missing_messages.append(f'"{label}" is not mentioned in the input.')
+
+    return missing_messages
+
 
 # Pre-load prompts once
 PROMPTS = load_prompts()
 SUMMARIZATION_PROMPT = PROMPTS.get("SUMMARIZATION_PROMPT", "")
 SINGLE_SUMMARIZATION_PROMPT = SUMMARIZATION_PROMPT.replace("test scenarios", "test scenario").replace("each test case", "the test case")
-# GAP analyzer prompts — selected at runtime based on user_account_creation
-GAP_ANALYZER_PROMPT_SUPPORTED     = PROMPTS.get("GAP_ANALYZER_PROMPT_USER_CREATION_SUPPORTED", "")
-GAP_ANALYZER_PROMPT_NOT_SUPPORTED = PROMPTS.get("GAP_ANALYZER_PROMPT_USER_CREATION_NOT_SUPPORTED", "")
-# Split coverage validator prompts — selected at runtime based on user_account_creation
-COVERAGE_VALIDATOR_PROMPT_YES = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT_YES", "")
-COVERAGE_VALIDATOR_PROMPT_NO  = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT_NO", "")
+GAP_ANALYZER_PROMPT = GAP_ANALYZER_PROMPT_TEMPLATE # Use hardcoded latest version
+COVERAGE_VALIDATOR_PROMPT = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT", "")
 
 
 def _normalize_title(title: str) -> str:
@@ -218,15 +377,6 @@ def assess_section_health(structured_data: dict) -> dict:
     s84 = _is_unhealthy(sec_84_found, status_84, steps_84)
     s11 = _is_unhealthy(sec_11_found, status_11, cases_11)
 
-    # Count mismatch means Section 11 mapping integrity is unreliable.
-    # Treat it as logically DEGRADED (s11=1) so downstream scope routing
-    # automatically falls back to combined Section 8.1 injection.
-    if s11 == 0 and len(scenarios_81) != len(cases_11):
-        print(f"  [HEALTH] Section 11 count mismatch "
-              f"(8.1={len(scenarios_81)} vs 11={len(cases_11)}) "
-              f"-> treated as DEGRADED (s11=1)")
-        s11 = 1
-
     return {
         "section_81": s81,
         "section_84": s84,
@@ -244,42 +394,81 @@ def assess_section_health(structured_data: dict) -> dict:
 # EXTRACT & COMBINE FOR LLM
 # ---------------------------------------------------------------------------
 
-def extract_scenarios_for_llm(health: dict) -> list:
+def extract_scenarios(structured_json: dict) -> list:
     """
-    Positional extraction from raw section data (8.1, 8.4, 11).
-    Returns combined list for LLM processing.
+    Positional extraction:
+    - Section 8.1  -> descriptions (ORDER SOURCE)
+    - Section 8.4  -> steps (PRIMARY)
+    - Section 11   -> fallback steps + OUTPUT KEYS (exact test_case_heading strings)
+    
+    All mapping is purely positional (index-based). No ID matching.
     """
-    scenarios_81 = health["raw_81"]
-    steps_84 = health["raw_84"]
-    cases_11 = health["raw_11"]
+
+    def normalize_title(title: str) -> str:
+        return re.sub(r'[^a-z0-9]', '', title.lower())
+
+    scenarios_81: list = []   # [{description}]
+    steps_84: list = []       # [steps[]]
+    cases_11: list = []       # [steps[]]
+    section11_keys: list = [] # exact test_case_heading strings from Section 11
+
+    for section in structured_json.get("sections", []):
+        title_norm = normalize_title(section.get("title", ""))
+
+        if "numberoftestscenarios" in title_norm:
+            for ts in section.get("test_scenarios", []):
+                scenarios_81.append({
+                    "description": ts.get("description", ""),
+                    "test_scenario": ts.get("test_scenario", "")
+                })
+
+        elif "testexecutionsteps" in title_norm:
+            for item in section.get("execution_steps", []):
+                steps_84.append(item.get("steps", []))
+
+        elif "testexecution" in title_norm:
+            for tc in section.get("test_cases", []):
+                section11_keys.append(tc.get("test_case_heading", "").strip())
+                steps = [
+                    s for s in tc.get("execution", [])
+                    if isinstance(s, dict) and "step" in s
+                ]
+                cases_11.append(steps)
+
+    if not scenarios_81:
+        raise ValueError("Section 8.1 not found or empty")
+
+    if steps_84 and len(steps_84) != len(scenarios_81):
+        print(f"WARNING: 8.1 has {len(scenarios_81)} scenarios but 8.4 has {len(steps_84)} steps")
+
+    if section11_keys and len(section11_keys) != len(scenarios_81):
+        print(f"WARNING: Section 11 has {len(section11_keys)} cases but 8.1 has {len(scenarios_81)} scenarios")
 
     combined = []
     count = len(scenarios_81)
 
     for i in range(count):
-        desc = scenarios_81[i].get("description", "") if i < len(scenarios_81) else ""
-        
-        # Capture the original test scenario label from 8.1
-        s81_key = scenarios_81[i].get("test_scenario", f"Test Scenario {i + 1}") if i < len(scenarios_81) else f"Test Scenario {i + 1}"
-
-        steps = []
-        if i < len(steps_84):
-            steps = steps_84[i].get("steps", [])
-        elif i < len(cases_11):
-            tc = cases_11[i]
-            steps = [s for s in tc.get("execution", []) if isinstance(s, dict) and "step" in s]
-
-        s11_key = None
-        if i < len(cases_11):
-            s11_key = cases_11[i].get("test_case_heading", "").strip() or None
-
+        s81_key = scenarios_81[i].get("test_scenario")
+        if not s81_key:
+            s81_key = f"Test Scenario {i + 1}"
+            
         combined.append({
             "tid": f"Test Scenario {i + 1}",
-            "description": desc,
-            "steps": steps,
-            "section11_key": s11_key,
-            "section81_key": s81_key,
+            "description": scenarios_81[i]["description"],
+            "steps": (
+                steps_84[i] if i < len(steps_84)
+                else cases_11[i] if i < len(cases_11)
+                else []
+            ),
+            "section11_key": (
+                section11_keys[i] if i < len(section11_keys)
+                else None
+            ),
+            "section81_key": s81_key
         })
+
+    for i, c in enumerate(combined):
+        print(f"[MAP] {i + 1} -> {c['section11_key']}")
 
     return combined
 
@@ -310,6 +499,11 @@ def summarize_scenarios_in_pairs(
     If the last chunk has only 1 scenario, send it alone with a single-item prompt.
     Returns a combined list of {test_case_id, test_case_summary} dicts.
     """
+    auth_methods = ", ".join(user_answers.get("authentication_access_methods", []))
+    answer_values = {
+        "authentication_access_methods": auth_methods,
+    }
+
     all_summaries = []
 
     for i in range(0, len(scenarios), 2):
@@ -324,18 +518,18 @@ def summarize_scenarios_in_pairs(
             prompt = SUMMARIZATION_PROMPT
 
         # Render all placeholders
-        render_values = {"test_scenarios": payload_json}
+        render_values = dict(answer_values)
+        render_values["test_scenarios"] = payload_json
         prompt_text = render_prompt(prompt, render_values)
         messages = _parse_chatml(prompt_text)
 
+        llm_endpoint = llm_endpoint.strip()
         if llm_endpoint.endswith("/api/generate"):
             response_text = _ollama_generate(llm_endpoint, llm_model, messages)
         elif llm_endpoint.endswith("/v1/chat/completions"):
             response_text = _openai_chat_completions(llm_endpoint, llm_model, messages)
         else:
-            raise ValueError(
-                "Unsupported LLM endpoint. Use /api/generate or /v1/chat/completions"
-            )
+            raise ValueError(f"Unsupported LLM endpoint. Got '{llm_endpoint}'")
 
         pair_ids = [s.get("tid", "?") for s in pair]
 
@@ -374,26 +568,21 @@ def build_prompt(
     test_scenario_summaries: str,
     test_scenarios_text: str,
 ) -> str:
-    # Select focused prompt based on pre-decided account creation flag
-    # user_account_creation=True  → dynamic accounts → Prompt YES (C1-C6)
-    # user_account_creation=False → predefined only  → Prompt NO  (C1,C5,C6,C7)
-    if user_answers.get("user_account_creation", False):
-        prompt_template = COVERAGE_VALIDATOR_PROMPT_YES
-        print("[PROMPT ROUTE] user_account_creation=YES -> COVERAGE_VALIDATOR_PROMPT_YES")
+    prompt_template = COVERAGE_VALIDATOR_PROMPT
+
+    auth_methods_value = user_answers.get("authentication_access_methods", "")
+    if isinstance(auth_methods_value, list):
+        auth_methods = ",".join(
+            str(item).strip() for item in auth_methods_value if str(item).strip()
+        )
     else:
-        prompt_template = COVERAGE_VALIDATOR_PROMPT_NO
-        print("[PROMPT ROUTE] user_account_creation=NO  -> COVERAGE_VALIDATOR_PROMPT_NO")
+        auth_methods = str(auth_methods_value).strip()
 
-    machine_accounts = "TRUE" if user_answers.get("machine_accounts_supported") else "FALSE"
-
+    # Strict coverage payload: only the fields defined in answer.json for coverage context.
     payload = {
         "test_scenario_summaries": test_scenario_summaries,
         "test_scenarios": test_scenarios_text,
-        "machine_accounts_supported": machine_accounts,
-        # Legacy field kept for gap analyzer compatibility
-        "account_mode": user_answers.get("account_mode", "predefined/factory user accounts"),
-        # YES/NO flags used in both prompts
-        "predefined/factory_user_accounts": user_answers.get("predefined/factory_user_accounts", "YES"),
+        "authentication_access_methods": auth_methods,
     }
 
     return render_prompt(prompt_template, payload)
@@ -409,6 +598,12 @@ def run_gap_analysis(
     Run gap analysis on each scenario.
     Displays a preview of the final prompt in the CLI for the first case.
     """
+    auth_methods = ", ".join(user_answers.get("authentication_access_methods", []))
+    
+    base_payload = {
+        "authentication_access_methods": auth_methods,
+    }
+
     all_gaps = {}
     count = len(scenarios)
 
@@ -420,37 +615,34 @@ def run_gap_analysis(
         tid = s.get("tid", "Unknown")
         name = s.get("description", "")
 
-        # When s11 was degraded (count mismatch), section11_key is None for
-        # extra scenarios. Fall back to section81_key so gap analysis completes.
-        section_11_id = s.get("section11_key") or s.get("section81_key") or tid
-        if not s.get("section11_key"):
-            print(f"  [WARN] No Section 11 key for {tid} "
-                  f"(s11 degraded) -> using fallback key: '{section_11_id}'")
+        # STRICT: use exact Section 11 heading from JSON — no synthesis
+        if "section11_key" not in s or not s["section11_key"]:
+            raise ValueError(f"Missing Section 11 key for scenario index {idx} (tid={tid})")
+        section_11_id = s["section11_key"]
 
-        render_values = {
-            "test_case_id": tid,
-            "test_case_name": name,
-            "account_mode": user_answers.get("account_mode", "predefined/factory user accounts"),
-            "machine_accounts_supported": "TRUE" if user_answers.get("machine_accounts_supported") else "FALSE",
-            "predefined_user_accounts": user_answers.get("predefined/factory_user_accounts", "YES"),
-            "dynamic_user_accounts": user_answers.get("dynamic_user_accounts", "NO"),
-        }
+        render_values = dict(base_payload)
+        render_values["test_case_id"] = tid
+        render_values["test_scenario"] = name
 
-        # Select prompt based on user_account_creation flag
-        if user_answers.get("user_account_creation", False):
-            gap_prompt = GAP_ANALYZER_PROMPT_SUPPORTED
-        else:
-            gap_prompt = GAP_ANALYZER_PROMPT_NOT_SUPPORTED
+        prompt_text = render_prompt(GAP_ANALYZER_PROMPT_TEMPLATE, render_values)
+        
+        # Print the final prompt for the first case as a preview
+        if idx == 1:
+            print("\n" + "="*60)
+            print("GAP ANALYZER -- FINAL PROMPT PREVIEW (FIRST CASE)")
+            print("="*60)
+            print(prompt_text)
+            print("="*60 + "\n")
 
-        prompt_text = render_prompt(gap_prompt, render_values)
         messages = _parse_chatml(prompt_text)
 
+        llm_endpoint = llm_endpoint.strip()
         if llm_endpoint.endswith("/api/generate"):
             response_text = _ollama_generate(llm_endpoint, llm_model, messages)
         elif llm_endpoint.endswith("/v1/chat/completions"):
             response_text = _openai_chat_completions(llm_endpoint, llm_model, messages)
         else:
-            raise ValueError("Unsupported LLM endpoint")
+            raise ValueError(f"Unsupported LLM endpoint. Got: '{llm_endpoint}'")
 
         print(f"\n--- Gap Analysis Response: {tid} ---")
         print(response_text)
@@ -466,9 +658,13 @@ def run_gap_analysis(
             entry = parsed
 
         if entry:
+            dev_sum = entry.get("deviation_summary", "")
+            if isinstance(dev_sum, list):
+                dev_sum = " ".join(str(i) for i in dev_sum)
+                
             all_gaps[section_11_id] = {
                 "test_case_name": entry.get("test_case_name", name),
-                "deviation_summary": entry.get("deviation_summary", ""),
+                "deviation_summary": dev_sum.strip(),
                 "section81_key": s.get("section81_key", tid)
             }
 
@@ -1068,7 +1264,7 @@ def run_validation(
         return
 
     # ---- 8.1 == 8.4 counts match → Run LLM validation ----
-    all_scenarios = extract_scenarios_for_llm(health)
+    all_scenarios = extract_scenarios(structured_data)
 
     # Format for coverage prompt
     test_scenarios_lines = [f"- {ts['tid']} {ts['description']}" for ts in all_scenarios]
@@ -1090,20 +1286,14 @@ def run_validation(
     # Phase 2: Coverage validation
     print("Phase 2: Running coverage validation...")
     coverage_prompt_text = build_prompt(user_answers, test_scenario_summaries, test_scenarios_text)
-
-    print("\n" + "="*60)
-    print("COVERAGE VALIDATOR -- FINAL PROMPT SENT TO LLM")
-    print("="*60)
-    print(coverage_prompt_text)
-    print("="*60 + "\n")
-
     coverage_messages = _parse_chatml(coverage_prompt_text)
+    llm_endpoint = llm_endpoint.strip()
     if llm_endpoint.endswith("/api/generate"):
         coverage_response = _ollama_generate(llm_endpoint, llm_model, coverage_messages)
     elif llm_endpoint.endswith("/v1/chat/completions"):
         coverage_response = _openai_chat_completions(llm_endpoint, llm_model, coverage_messages)
     else:
-        raise ValueError("Unsupported LLM endpoint")
+        raise ValueError(f"Unsupported LLM endpoint. Got: '{llm_endpoint}'")
 
     print("\n--- Coverage Validation Response ---")
     print(coverage_response)
@@ -1127,10 +1317,13 @@ def run_validation(
         print("[OUTPUT] Coverage -> Section 8.1 | Scope -> Per-scenario in Section 11")
         inject_scope_per_scenario(skeleton, gap_result, health)
         _write_gap_to_pipeline(gap_result, pipeline_path)
-    else:
-        # count mismatch (8.1 != 11) OR Section 11 unhealthy (s11=1) -> combined scope in 8.1
-        reason = "Section 11 FAIL" if s11 == 1 else f"count mismatch 8.1={health['count_81']} vs 11={health['count_11']}"
-        print(f"[OUTPUT] Coverage -> Section 8.1 | Scope -> Combined in Section 8.1 ({reason})")
+    elif s11 == 0 and health["count_81"] != health["count_11"]:
+        # 8.1==8.4 but !=11 -> combined scope in 8.1
+        print("[OUTPUT] Coverage -> Section 8.1 | Scope -> Combined in Section 8.1")
+        inject_scope_combined_into_81(skeleton, gap_result)
+    elif s11 == 1:
+        # Section 11 unhealthy -> combined scope in 8.1
+        print("[OUTPUT] Coverage -> Section 8.1 | Scope -> Combined in Section 8.1 (Section 11 FAIL)")
         inject_scope_combined_into_81(skeleton, gap_result)
 
     # Populate top-level checks summary then write
@@ -1210,7 +1403,7 @@ def detect_all_files(args: list[str]) -> tuple[Path | None, Path | None, Path | 
                 if isinstance(data, dict):
                     if "sections" in data:
                         structured = path
-                    elif "local_management_access_methods" in data or "remote_management_access_methods" in data:
+                    elif "authentication_access_methods" in data:
                         answer = path
                     elif "gap_assessment" in data or "Protocols" in data:
                         pipeline = path
@@ -1244,6 +1437,20 @@ if __name__ == "__main__":
 
     user_answers = ensure_answers(load_answers(answers_path))
     pipeline_output_file = pipeline_path if pipeline_path else (BASE_DIR / "pipeline_output.json")
+
+    questions_data = load_questions(BASE_DIR / "questions.json")
+    missing_answer_messages = validate_answers_against_questions(user_answers, questions_data)
+    
+    if missing_answer_messages:
+        skeleton = _load_pipeline_skeleton(pipeline_output_file)
+        for msg in missing_answer_messages:
+            inject_error_into_81(skeleton, msg)
+        _populate_top_level_checks(skeleton)
+        output_path = BASE_DIR / "output.json"
+        output_path.write_text(json.dumps(skeleton.get("skeleton", skeleton), indent=2), encoding="utf-8")
+        for msg in missing_answer_messages:
+            print(f"[BLOCKED] {msg}")
+        sys.exit(1)
 
     try:
         run_validation(

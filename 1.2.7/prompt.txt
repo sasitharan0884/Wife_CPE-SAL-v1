@@ -1,0 +1,201 @@
+--- SUMMARIZATION_PROMPT ---
+<|im_start|>system
+You are a technical documentation assistant specializing in security compliance testing.
+
+Summarize test scenarios for Wi-Fi CPE authentication compliance.
+
+For each test case return JSON only:
+{
+  "test_summary": [
+    {
+      "test_case_id": "<ID>",
+      "objective": "<1-2 sentences on security intent>",
+      "execution_summary": "<brief reproducible steps>"
+    }
+  ]
+}
+
+Rules:
+- Focus on intent, not results/observations
+- No pass/fail, logs, screenshots, recommendations
+- Objective: what control/behavior validated
+- Execution: key actions/tools/interfaces
+<|im_end|>
+<|im_start|>user
+TEST SCENARIOS:
+{test_scenarios}
+<|im_end|>
+<|im_start|>assistant
+
+--- COVERAGE_VALIDATOR_PROMPT ---
+SYSTEM
+======
+You are a TELECOM TEST PLAN COVERAGE VALIDATOR specializing
+in TSTP (Test Schedule and Test Procedure) evaluation for
+telecom security
+
+Your task is to verify whether the provided TEST SCENARIOS
+contain test cases that satisfy the required password masking
+coverage for the declared authentication access methods.
+
+You MUST evaluate coverage based STRICTLY on test design
+intent (TSTP) — NOT on execution outcome, system behavior,
+or implementation correctness.
+
+DO NOT evaluate:
+  * Test execution results or pass/fail outcomes
+  * Execution feasibility or system constraints
+  * Implementation-level correctness
+  * Keyword presence alone without design intent
+
+DO NOT classify test cases as aligned or not aligned.
+DO NOT introduce interfaces not explicitly declared.
+
+=================================================
+INPUTS
+======
+
+Authentication Access Methods:
+{authentication_access_methods}
+
+Test Scenarios:
+{test_scenarios}
+
+Test Scenario Summaries:
+{test_scenario_summaries}
+
+=================================================
+SCOPE CONSTRAINT (STRICT)
+=========================
+
+All validation MUST be strictly limited to the access methods
+explicitly declared in:
+  * {authentication_access_methods}
+
+DO NOT infer, assume, or introduce additional interfaces
+beyond what is explicitly listed.
+
+=================================================
+TWO-PASS LOOKUP RULE (MANDATORY)
+================================
+
+For EVERY validation check, you MUST apply
+the following two-pass lookup strategy:
+
+PASS 1 — Look in Test Scenarios:
+  Examine each test scenario for an explicit test design
+  intent that satisfies the check being validated.
+  If found → mark as COVERED.
+
+PASS 2 — Look in Test Scenario Summaries:
+  ONLY if no coverage is found in PASS 1.
+  Examine summaries for clearly stated intent.
+  If found → mark as COVERED.
+
+If neither PASS 1 nor PASS 2 yields coverage → NOT COVERED.
+
+IMPORTANT:
+  * A scenario that is DEFINED but includes execution
+    limitations SHALL still be considered VALID COVERAGE.
+  * Execution feasibility MUST NOT influence decision.
+
+=================================================
+VALIDATION BASIS
+================
+
+Validate ONLY the following checklist item:
+
+For EACH authentication access method:
+  1. Password masking on input is intended/tested
+
+DO NOT validate anything beyond this.
+
+=================================================
+VALIDATION STEP
+===============
+
+STEP 1 — PASSWORD MASKING ON INPUT
+----------------------------------
+
+For EACH declared authentication access method in
+{authentication_access_methods}:
+
+  Look in Test Scenarios:
+    Does any scenario CLEARLY intend to verify that password characters
+    are masked or obscured during input/entry on this access method?
+
+      for This Access method set password_masking_on_input = PASS
+      else set password_masking_on_input = FAIL
+
+  Else look in Test Scenario Summaries:
+    - Does any summary CLEARLY intend to verify that password characters
+    are masked or obscured during input/entry on this access method?
+
+      for This Access method set password_masking_on_input = PASS
+      else set password_masking_on_input = FAIL
+
+
+RULES:
+  * Any test intent validating obscured password input = SUFFICIENT
+  * Exact symbols (*, •) are NOT mandatory — masking intent is sufficient
+  * A single scenario per interface = SUFFICIENT
+  * Execution feasibility MUST NOT affect decision
+  * The Access method needed to be Explicitly mentioned in the Test Scenario  
+  * Assumption is not allowed
+
+DECISION:
+  PASS → COVERED for ALL declared interfaces
+  FAIL → NOT COVERED for ANY declared interface
+
+=================================================
+COMPLIANCE SCORE CALCULATION
+============================
+
+Each authentication access method contributes 100 points.
+
+For EACH interface:
+  - password_masking_on_input → 100 points
+
+SCORING RULE:
+  COVERED → full points
+  NOT COVERED → 0 points
+
+TOTAL SCORE:
+  compliance_score =
+    ROUND(covered_interfaces / total_interfaces × 100)
+
+=================================================
+FINAL DECISION
+==============
+
+IF all interfaces COVERED → result = "PASS"
+IF any interface NOT COVERED → result = "FAIL"
+
+missing_coverage_summary: Audit Sentence mentioning why it is Fail and don't expose Intenal checks names and lookup_methods name in it.
+For example: "Password masking on input is not tested for Console Via SSH" (NOT "password_masking_on_input not found in lookup_methods for Console Via SSH").
+
+=================================================
+OUTPUT FORMAT
+=============
+
+Return ONLY valid JSON. No explanation.
+
+{
+  "access_method_coverage": [
+    {
+      "access_method_name": "<string>",
+      "password_masking_on_input": "PASS | FAIL",
+      "evidence": "<exact phrase from the TSTP or Summary that matches the requirement>"
+    }
+  ],
+  "compliance_score": 0,
+  "result": "PASS | FAIL",
+  "missing_coverage_summary": [
+    ""
+  ]
+}
+Strict Rules:
+access_method_coverage MUST be an array
+Each object represents ONE access method
+Do NOT merge multiple access methods into one object
+Always include all detected access methods

@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import re
 from pathlib import Path
@@ -7,12 +6,6 @@ from typing import Any, Dict, List, Union
 from urllib import request
 import time
 from urllib import error
-
-# Reconfigure stdout/stderr to UTF-8 to avoid UnicodeEncodeError on Windows cp1252 consoles
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 BASE_DIR = Path(__file__).parent
 
@@ -23,10 +16,10 @@ BASE_DIR = Path(__file__).parent
 # Injected from MuruganAI Runner Environment Variables (No Hardcoded Values)
 
 
-DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.142.5:30203/v1/chat/completions")
+DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.141.174:30406/v1/chat/completions")
 DEFAULT_LLM_MODEL = os.environ.get("DYNAMIC_LLM_MODEL", "sorc/qwen3.5-instruct:latest")
 DEFAULT_VL_MODEL = os.environ.get("DYNAMIC_VLM_MODEL") or os.environ.get("DYNAMIC_LLM_MODEL") or "sorc/qwen3.5-instruct:latest"
-DEFAULT_LLM_BEARER_TOKEN = os.environ.get("DYNAMIC_LLM_BEARER_TOKEN") or os.environ.get("DYNAMIC_LLM_API_KEY") or "fe83463d7f7b8a391bf9bd9d68fe65c9daf12b0529bdd4ee1fec36aa51e74134"
+DEFAULT_LLM_BEARER_TOKEN = os.environ.get("DYNAMIC_LLM_BEARER_TOKEN") or os.environ.get("DYNAMIC_LLM_API_KEY") or "9f40414a2c1b9762595c198c554163dab08bb34d1181e670d3f892b3cb46eb3a"
 StructuredInput = Union[Dict[str, Any], str, Path]
 
 
@@ -117,9 +110,15 @@ def _normalize_bool(value: Any) -> bool:
 
 
 def ensure_answers(answers: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate and normalize answer.json for Requirement 1.2.5.
+    Accepts either:
+      - New format: lan_supported/wifi_supported (yes/no or true/false) + authentication_interfaces
+      - Legacy format: user_session_types (list) + authentication_interfaces
+    Converts new format into legacy user_session_types list before returning.
+    """
     required_keys = [
-        "user_account_creation",
-        "machine_accounts_supported",
+        "authentication_interfaces",
     ]
     missing = [key for key in required_keys if key not in answers]
     if missing:
@@ -127,35 +126,77 @@ def ensure_answers(answers: Dict[str, Any]) -> Dict[str, Any]:
 
     normalized = dict(answers)
 
-    normalized["machine_accounts_supported"] = _normalize_bool(answers.get("machine_accounts_supported"))
+    # Validate authentication_interfaces
+    if not isinstance(normalized.get("authentication_interfaces"), str) or not normalized.get("authentication_interfaces").strip():
+        raise ValueError("authentication_interfaces must be a non-empty string")
 
-    # Derive YES/NO flags from user_account_creation boolean
-    # TRUE  → DUT supports dynamic account creation → dynamic=YES, predefined=NO
-    # FALSE → DUT uses predefined/factory accounts only → dynamic=NO, predefined=YES
-    user_account_creation = _normalize_bool(answers.get("user_account_creation", False))
-    normalized["user_account_creation"] = user_account_creation
+    # Detect new input format (lan_supported / wifi_supported)
+    has_new_format = "lan_supported" in answers or "wifi_supported" in answers
 
-    if user_account_creation:
-        normalized["dynamic_user_accounts"] = "YES"
-        normalized["predefined/factory_user_accounts"] = "NO"
-        normalized["account_mode"] = "dynamic user accounts"
+    if has_new_format:
+        # Normalize boolean true/false (JSON or Python) → "yes"/"no" strings
+        for field in ("lan_supported", "wifi_supported"):
+            val = normalized.get(field)
+            if isinstance(val, bool):
+                normalized[field] = "yes" if val else "no"
+            elif isinstance(val, str) and val.strip().lower() in ("true", "1"):
+                normalized[field] = "yes"
+            elif isinstance(val, str) and val.strip().lower() in ("false", "0"):
+                normalized[field] = "no"
+
+        if normalized.get("lan_supported") not in ["yes", "no"]:
+            raise ValueError("lan_supported must be 'yes', 'no', true, or false")
+        if normalized.get("wifi_supported") not in ["yes", "no"]:
+            raise ValueError("wifi_supported must be 'yes', 'no', true, or false")
+
+        # Convert new format into legacy session types list
+        session_types = []
+        if normalized.get("lan_supported") == "yes":
+            session_types.append("lan_authenticated_users")
+        if normalized.get("wifi_supported") == "yes":
+            session_types.append("wifi_authenticated_users")
+        # Admin sessions assumed always present
+        session_types.append("admin_users")
+        normalized["user_session_types"] = session_types
+
     else:
-        normalized["dynamic_user_accounts"] = "NO"
-        normalized["predefined/factory_user_accounts"] = "YES"
-        normalized["account_mode"] = "predefined/factory user accounts"
+        # Legacy format: validate user_session_types directly
+        if not isinstance(normalized.get("user_session_types"), list):
+            raise ValueError("user_session_types must be a list")
 
     return normalized
+
+
+
+def map_session_applicability(answers: dict) -> dict:
+    session_types = answers.get("user_session_types", [])
+    result = {
+        "has_authenticated_sessions": False,
+        "has_admin_sessions": False,
+        "has_data_sessions": False
+    }
+
+    if not isinstance(session_types, list):
+        return result
+
+    if "admin_users" in session_types:
+        result["has_authenticated_sessions"] = True
+        result["has_admin_sessions"] = True
+
+    if "wifi_authenticated_users" in session_types or "lan_authenticated_users" in session_types:
+        result["has_authenticated_sessions"] = True
+        result["has_data_sessions"] = True
+
+    return result
 
 # Pre-load prompts once
 PROMPTS = load_prompts()
 SUMMARIZATION_PROMPT = PROMPTS.get("SUMMARIZATION_PROMPT", "")
 SINGLE_SUMMARIZATION_PROMPT = SUMMARIZATION_PROMPT.replace("test scenarios", "test scenario").replace("each test case", "the test case")
-# GAP analyzer prompts — selected at runtime based on user_account_creation
-GAP_ANALYZER_PROMPT_SUPPORTED     = PROMPTS.get("GAP_ANALYZER_PROMPT_USER_CREATION_SUPPORTED", "")
-GAP_ANALYZER_PROMPT_NOT_SUPPORTED = PROMPTS.get("GAP_ANALYZER_PROMPT_USER_CREATION_NOT_SUPPORTED", "")
-# Split coverage validator prompts — selected at runtime based on user_account_creation
-COVERAGE_VALIDATOR_PROMPT_YES = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT_YES", "")
-COVERAGE_VALIDATOR_PROMPT_NO  = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT_NO", "")
+# Requirement 1.2.5 – single prompt for coverage validation (no routing)
+COVERAGE_VALIDATOR_PROMPT_1_2_5 = PROMPTS.get("COVERAGE_VALIDATOR_PROMPT_1_2_5", "")
+# Requirement 1.2.5 – single prompt for gap/scope analysis (no routing)
+GAP_ANALYZER_PROMPT_1_2_5 = PROMPTS.get("SCOPE_VALIDATOR_PROMPT_1_2_5") or PROMPTS.get("GAP_ANALYZER_PROMPT_1_2_5", "")
 
 
 def _normalize_title(title: str) -> str:
@@ -374,26 +415,20 @@ def build_prompt(
     test_scenario_summaries: str,
     test_scenarios_text: str,
 ) -> str:
-    # Select focused prompt based on pre-decided account creation flag
-    # user_account_creation=True  → dynamic accounts → Prompt YES (C1-C6)
-    # user_account_creation=False → predefined only  → Prompt NO  (C1,C5,C6,C7)
-    if user_answers.get("user_account_creation", False):
-        prompt_template = COVERAGE_VALIDATOR_PROMPT_YES
-        print("[PROMPT ROUTE] user_account_creation=YES -> COVERAGE_VALIDATOR_PROMPT_YES")
-    else:
-        prompt_template = COVERAGE_VALIDATOR_PROMPT_NO
-        print("[PROMPT ROUTE] user_account_creation=NO  -> COVERAGE_VALIDATOR_PROMPT_NO")
-
-    machine_accounts = "TRUE" if user_answers.get("machine_accounts_supported") else "FALSE"
+    """
+    Build the coverage validation prompt for Requirement 1.2.5.
+    Always uses COVERAGE_VALIDATOR_PROMPT_1_2_5 — no conditional routing.
+    """
+    print("[PROMPT ROUTE] → COVERAGE_VALIDATOR_PROMPT_1_2_5")
+    prompt_template = COVERAGE_VALIDATOR_PROMPT_1_2_5
 
     payload = {
         "test_scenario_summaries": test_scenario_summaries,
         "test_scenarios": test_scenarios_text,
-        "machine_accounts_supported": machine_accounts,
-        # Legacy field kept for gap analyzer compatibility
-        "account_mode": user_answers.get("account_mode", "predefined/factory user accounts"),
-        # YES/NO flags used in both prompts
-        "predefined/factory_user_accounts": user_answers.get("predefined/factory_user_accounts", "YES"),
+        "user_session_types": json.dumps(user_answers.get("user_session_types", [])),
+        "authentication_interfaces": user_answers.get("authentication_interfaces", ""),
+        "lan_supported": user_answers.get("lan_supported", "no"),
+        "wifi_supported": user_answers.get("wifi_supported", "no"),
     }
 
     return render_prompt(prompt_template, payload)
@@ -406,8 +441,8 @@ def run_gap_analysis(
     llm_model: str,
 ) -> Dict[str, Any]:
     """
-    Run gap analysis on each scenario.
-    Displays a preview of the final prompt in the CLI for the first case.
+    Run gap/scope analysis on each scenario for Requirement 1.2.5.
+    Always uses GAP_ANALYZER_PROMPT_1_2_5 — no conditional routing.
     """
     all_gaps = {}
     count = len(scenarios)
@@ -430,19 +465,12 @@ def run_gap_analysis(
         render_values = {
             "test_case_id": tid,
             "test_case_name": name,
-            "account_mode": user_answers.get("account_mode", "predefined/factory user accounts"),
-            "machine_accounts_supported": "TRUE" if user_answers.get("machine_accounts_supported") else "FALSE",
-            "predefined_user_accounts": user_answers.get("predefined/factory_user_accounts", "YES"),
-            "dynamic_user_accounts": user_answers.get("dynamic_user_accounts", "NO"),
+            "authentication_interfaces": user_answers.get("authentication_interfaces", ""),
+            "lan_supported": user_answers.get("lan_supported", "no"),
+            "wifi_supported": user_answers.get("wifi_supported", "no"),
         }
 
-        # Select prompt based on user_account_creation flag
-        if user_answers.get("user_account_creation", False):
-            gap_prompt = GAP_ANALYZER_PROMPT_SUPPORTED
-        else:
-            gap_prompt = GAP_ANALYZER_PROMPT_NOT_SUPPORTED
-
-        prompt_text = render_prompt(gap_prompt, render_values)
+        prompt_text = render_prompt(GAP_ANALYZER_PROMPT_1_2_5, render_values)
         messages = _parse_chatml(prompt_text)
 
         if llm_endpoint.endswith("/api/generate"):
@@ -851,7 +879,7 @@ def inject_coverage_into_skeleton(skeleton: dict, coverage_result: dict) -> None
             errors.append(_make_error(
                 msg=str(item),
                 where="8.1. Number of Test Scenarios",
-                what="Coverage Validation across Section 8 and 11",
+                what="Coverage Validation",
                 suggestion=str(item),
                 redirect_text="Number of Test Scenarios",
             ))
@@ -1092,7 +1120,7 @@ def run_validation(
     coverage_prompt_text = build_prompt(user_answers, test_scenario_summaries, test_scenarios_text)
 
     print("\n" + "="*60)
-    print("COVERAGE VALIDATOR -- FINAL PROMPT SENT TO LLM")
+    print("COVERAGE VALIDATOR — FINAL PROMPT SENT TO LLM")
     print("="*60)
     print(coverage_prompt_text)
     print("="*60 + "\n")
@@ -1152,13 +1180,12 @@ def _write_intelligence_json(result: Dict[str, Any], output_path: Path) -> None:
       }
     }
     """
-    raw_score = result.get("compliance_score", None)
+    intent_results = result.get("intent_results", [])
 
-    # Normalise: accept int, float, numeric string, or None
-    try:
-        score_float = float(raw_score) if raw_score is not None else 0.0
-    except (TypeError, ValueError):
-        score_float = 0.0
+    applicable = [i for i in intent_results if i.get("result") != "NOT_APPLICABLE"]
+    passed = [i for i in applicable if i.get("result") == "PASS"]
+
+    score_float = (len(passed) / len(applicable)) * 100 if applicable else 0.0
 
     # Clamp to [0, 100] and format as "XX.YY"
     score_float = max(0.0, min(100.0, score_float))
@@ -1243,6 +1270,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     user_answers = ensure_answers(load_answers(answers_path))
+    
+    # Task 5 & 6: Applicability mapping and check
+    mapped = map_session_applicability(user_answers)
+    if not mapped["has_authenticated_sessions"]:
+        print("Requirement 1.2.5 NOT APPLICABLE")
+        sys.exit(0)
+
     pipeline_output_file = pipeline_path if pipeline_path else (BASE_DIR / "pipeline_output.json")
 
     try:

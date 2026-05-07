@@ -1,13 +1,9 @@
 {
   "questions": [
     {
-      "id": "user_account_type",
-      "label": "Which type of user accounts does the DUT support?",
-      "type": "select",
-      "options": [
-        "dynamic user accounts",
-        "predefined/factory user accounts"
-      ],
+      "id": "user_account_creation",
+      "label": "Does the DUT supports User Account Creation?",
+      "type": "boolean",
       "required": true
     },
     {

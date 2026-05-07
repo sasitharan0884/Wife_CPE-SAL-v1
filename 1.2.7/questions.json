@@ -1,0 +1,10 @@
+{
+  "questions": [
+    {
+      "id": "authentication_access_methods",
+      "label": "List all authentication access interfaces/methods supported by the DUT",
+      "type": "list",
+      "required": true
+    }
+  ]
+}

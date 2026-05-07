@@ -1,0 +1,23 @@
+1️⃣ Allowed HTTP Methods Validation
+
+Checks whether any test scenario verifies which methods are enabled on the server.
+
+2️⃣ Unused HTTP Methods Disabled
+
+Checks whether test scenarios confirm unnecessary methods are blocked or disabled.
+
+3️⃣ TRACE Method Validation
+
+Checks whether there is a test specifically for TRACE method.
+
+4️⃣ TRACK Method Validation
+
+Checks whether there is a test specifically for TRACK method
+
+| Requirement Clause                                                     | Meaning                                     | Validator Check                                 | Coverage Expected                                                                |
+| ---------------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| HTTP methods that are not required shall be deactivated                | Unused methods must be disabled             | **unused_http_methods**                         | Test scenarios verify PUT, DELETE, PATCH, OPTIONS etc. are blocked if not needed |
+| Standard requests only use GET, HEAD, and POST                         | Only standard methods should remain enabled | **allowed_http_methods**                        | Test scenarios verify enabled methods list contains only GET / HEAD / POST       |
+| If other methods are required, they shall not introduce security leaks | Extra methods must be securely handled      | Covered mainly through TRACE / TRACK validation | Test scenarios check risky methods are disabled or safe                          |
+| Security leaks such as TRACE                                           | TRACE can expose headers/session data       | **trace_method_validation**                     | Explicit TRACE method test required                                              |
+| Security leaks such as TRACK                                           | TRACK can create similar exposure           | **track_method_validation**                     | Explicit TRACK method test required                                              |

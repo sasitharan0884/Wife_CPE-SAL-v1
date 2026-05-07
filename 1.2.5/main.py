@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).parent
 # Injected from MuruganAI Runner Environment Variables (No Hardcoded Values)
 
 
-DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.141.174:30406/v1/chat/completions")
+DEFAULT_LLM_ENDPOINT = os.environ.get("DYNAMIC_LLM_URL", "http://109.165.139.149:30217/v1/chat/completions")
 DEFAULT_LLM_MODEL = os.environ.get("DYNAMIC_LLM_MODEL", "sorc/qwen3.5-instruct:latest")
 DEFAULT_VL_MODEL = os.environ.get("DYNAMIC_VLM_MODEL") or os.environ.get("DYNAMIC_LLM_MODEL") or "sorc/qwen3.5-instruct:latest"
 DEFAULT_LLM_BEARER_TOKEN = os.environ.get("DYNAMIC_LLM_BEARER_TOKEN") or os.environ.get("DYNAMIC_LLM_API_KEY") or "9f40414a2c1b9762595c198c554163dab08bb34d1181e670d3f892b3cb46eb3a"

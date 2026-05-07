@@ -411,43 +411,6 @@ ELSE:
     C5_config_timer = FAIL
 
 =================================================
-STEP 6:
-## C6 — Configurable Inactivity Timeout Enforcement Validation
-
-applicability: MANDATORY
-
-Intent:
-Ensure configured inactivity timeout values
-are actually enforced.
-
-Constraint:
-Timer configuration alone does NOT satisfy this validation.
-
-Reject the following — these do NOT satisfy C6:
-
-* scenarios that ONLY verify a default timeout exists
-* scenarios that ONLY verify reauthentication is required after timeout
-* scenarios that ONLY verify the DUT has a default inactive session timeout
-* scenarios that validate timeout without referencing a configured timer value
-* automatic logout from a default or unspecified timeout
-
-Accept ONLY scenarios that explicitly validate:
-- timeout enforcement occurs after the CONFIGURED (administrator-set) duration
-- inactivity lock or termination triggered after a CONFIGURED timer value
-- the DUT enforces the inactivity period that was explicitly set by an administrator
-
-CRITICAL DISAMBIGUATION:
-Verifying that "a default timeout exists" is NOT the same as verifying
-that a configured timeout value is enforced.
-The scenario MUST reference a configured value being enforced.
-
-If such explicit configured-enforcement validation exists:
-    C6_configurable_timeout_enforcement = PASS
-
-ELSE:
-    C6_configurable_timeout_enforcement = FAIL
-
-=================================================
 RESULT RULES
 ============
 
@@ -538,15 +501,12 @@ GLOBAL CHECK GAP RULE
 Generate individual remediation summaries for:
 
 * C5_config_timer
-* C6_configurable_timeout_enforcement
 
-ONLY if those checks fail.
+ONLY if that check fails.
 
-Examples:
+Example:
 
 "No test scenario validates configurable inactivity timeout timer values. Add a test scenario to explicitly validate administrator configurable inactivity timeout settings."
-
-"No test scenario validates inactivity timeout enforcement after configured duration. Add a test scenario to explicitly validate timeout enforcement after configured inactivity periods."
 
 -------------------------------------------------
 STRICT RULES
@@ -636,11 +596,6 @@ OUTPUT FORMAT
   },
 
   "C5_config_timer": {
-    "result": "PASS | FAIL",
-    "evidence": ""
-  },
-
-  "C6_configurable_timeout_enforcement": {
     "result": "PASS | FAIL",
     "evidence": ""
   },

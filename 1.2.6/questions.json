@@ -1,0 +1,25 @@
+{
+    "questions": [
+        {
+            "id": "access_methods",
+            "label": "List all access interfaces/methods supported by the DUT",
+            "type": "list",
+            "required": true
+        },
+        {
+            "id": "controller_support",
+            "label": "Is the DUT support centralized management / controller-based management?",
+            "type": "boolean",
+            "required": true
+        },
+        {
+            "id": "auth_controller_name",
+            "label": "List all controller names supported by the DUT",
+            "type": "list",
+            "required": true,
+            "show_if": {
+                "controller_support": true
+            }
+        }
+    ]
+}

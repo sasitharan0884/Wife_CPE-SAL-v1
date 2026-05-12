@@ -1,0 +1,34 @@
+{
+  "questions": [
+    {
+      "id": "transport_layer_protocols",
+      "label": "List the Transport Layer Protocols used by the DUT.",
+      "type": "list",
+      "hint": "Example: TCP, UDP",
+      "required": true
+    },
+    {
+      "id": "documented_ports_protocols",
+      "label": "List the documented ports necessary for the operation of the DUT.",
+      "type": "list",
+      "hint": "Example: 22, 53",
+      "required": true
+    },
+    {
+      "id": "is_dut_access_point",
+      "label": "Is the DUT an Access Point (AP)?",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "id": "documented_interfaces",
+      "label": "List the documented interfaces of the DUT.",
+      "type": "list",
+      "hint": "Example: Ethernet, WAN, LAN, Console",
+      "required": true,
+      "show_if": {
+        "is_dut_access_point": false
+      }
+    }
+  ]
+}

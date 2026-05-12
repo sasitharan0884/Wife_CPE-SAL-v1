@@ -1,0 +1,10 @@
+{
+    "questions": [
+        {
+            "id": "access_methods",
+            "label": "List all access interfaces/methods supported by the DUT",
+            "type": "list",
+            "required": true
+        }
+    ]
+}
